@@ -1,6 +1,6 @@
 # Web Crawler
 
-A flexible web crawler with CloudFlare bypass capabilities, built from the proven Stack Overflow chat scraper.
+A flexible web crawler with CloudFlare bypass capabilities
 
 ## Installation
 
