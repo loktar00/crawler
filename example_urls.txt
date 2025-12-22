@@ -1,0 +1,8 @@
+# Example URLs for testing the crawler
+# Lines starting with # are comments and will be ignored
+
+# Example sites (uncomment to use)
+# https://example.com
+# https://example.org
+
+# Add your URLs here, one per line
