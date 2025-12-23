@@ -362,11 +362,6 @@ class WebCrawler:
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(html_content)
 
-        # Also save URL mapping
-        mapping_file = domain_dir / f"{url_hash}.url"
-        with open(mapping_file, 'w', encoding='utf-8') as f:
-            f.write(url)
-
         logger.info(f"Saved: {url} -> {file_path.name}")
         return file_path
 
@@ -530,6 +525,29 @@ def load_urls_from_file(file_path):
         logger.error(f"File not found: {file_path}")
         return []
 
+    # Check if it's a JSONL file (JSON Lines format from list crawl)
+    if file_path.suffix == '.jsonl':
+        urls = []
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            data = json.loads(line)
+                            # Extract URL from the JSON object
+                            if isinstance(data, dict) and 'url' in data:
+                                urls.append(data['url'])
+                            else:
+                                logger.warning(f"Line missing 'url' field: {line[:50]}...")
+                        except json.JSONDecodeError:
+                            logger.warning(f"Could not parse JSON line: {line[:50]}...")
+            logger.info(f"Loaded {len(urls)} URLs from JSONL file")
+            return urls
+        except Exception as e:
+            logger.error(f"Error reading JSONL file: {e}")
+            return []
+
     # Check if it's a JSON file (discovered_links.json format)
     if file_path.suffix == '.json':
         try:
@@ -563,29 +581,30 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Crawl from config file
-  python crawler.py
-
-  # Crawl a single URL
+  # Standard crawl mode
   python crawler.py --url https://example.com
-
-  # Crawl multiple URLs
-  python crawler.py --urls https://example.com https://example.org
-
-  # Crawl from a file
   python crawler.py --file urls.txt
 
-  # Resume crawling from discovered_links.json
-  python crawler.py --file discovered_links.json
+  # List crawl mode (recipe-driven)
+  python crawler.py --mode list --recipe recipes/example_quotes.yaml
+  python crawler.py --mode list --recipe recipes/example_quotes.yaml --dry-run
+  python crawler.py --mode list --recipe recipes/example_quotes.yaml --force
 
-  # Crawl with max depth
-  python crawler.py --url https://example.com --max-depth 2
-
-  # Crawl with domain restriction
-  python crawler.py --url https://example.com --domains example.com
+  # Debug tools
+  python crawler.py --mode list --recipe recipes/example.yaml --verbose-selectors
+  python crawler.py --dump-html https://example.com
+  python crawler.py --screenshot https://example.com
         """
     )
 
+    # Mode selection
+    parser.add_argument('--mode', choices=['crawl', 'list'], default='crawl',
+                       help='Crawl mode: "crawl" (default) or "list" (recipe-driven)')
+
+    # Recipe for list mode
+    parser.add_argument('--recipe', help='Recipe YAML file for list mode')
+
+    # Standard crawl mode arguments
     parser.add_argument('--url', help='Single URL to crawl')
     parser.add_argument('--urls', nargs='+', help='Multiple URLs to crawl')
     parser.add_argument('--file', help='File containing URLs (one per line, or JSON)')
@@ -593,11 +612,50 @@ Examples:
     parser.add_argument('--domains', nargs='+', help='Allowed domains to crawl')
     parser.add_argument('--output', default='crawled_pages', help='Output directory')
     parser.add_argument('--links-file', default='discovered_links.json', help='File to save discovered links')
+
+    # Browser options
     parser.add_argument('--headless', action='store_true', help='Run browser in headless mode')
     parser.add_argument('--visible', action='store_true', help='Run browser in visible mode')
 
+    # Debug options
+    parser.add_argument('--dry-run', action='store_true',
+                       help='Print discovered links without saving (list mode)')
+    parser.add_argument('--verbose-selectors', action='store_true',
+                       help='Log match counts for CSS selectors (list mode)')
+    parser.add_argument('--force', action='store_true',
+                       help='Ignore seen pages and reprocess (list mode)')
+    parser.add_argument('--dump-html', metavar='URL',
+                       help='Dump HTML content for a URL and exit')
+    parser.add_argument('--screenshot', metavar='URL',
+                       help='Take screenshot of a URL and exit')
+
     args = parser.parse_args()
 
+    # Determine headless mode
+    headless = None
+    if args.headless:
+        headless = True
+    elif args.visible:
+        headless = False
+
+    # Handle debug tools
+    if args.dump_html:
+        _dump_html(args.dump_html, headless)
+        return
+
+    if args.screenshot:
+        _take_screenshot(args.screenshot, headless)
+        return
+
+    # Route to appropriate mode
+    if args.mode == 'list':
+        _run_list_mode(args, headless)
+    else:
+        _run_crawl_mode(args, headless)
+
+
+def _run_crawl_mode(args, headless):
+    """Run standard crawl mode."""
     # Collect start URLs from various sources
     start_urls = []
 
@@ -617,13 +675,6 @@ Examples:
             logger.error("No URLs provided! Use --url, --urls, --file, or set START_URLS in crawler_config.py")
             sys.exit(1)
 
-    # Determine headless mode
-    headless = None
-    if args.headless:
-        headless = True
-    elif args.visible:
-        headless = False
-
     # Create crawler
     crawler = WebCrawler(
         start_urls=start_urls,
@@ -638,6 +689,69 @@ Examples:
         crawler.crawl()
     finally:
         crawler._cleanup_browser()
+
+
+def _run_list_mode(args, headless):
+    """Run list crawl mode."""
+    if not args.recipe:
+        logger.error("List mode requires --recipe argument")
+        sys.exit(1)
+
+    # Import list crawler
+    try:
+        from list_crawler import run_list_crawl
+    except ImportError as e:
+        logger.error(f"Failed to import list_crawler: {e}")
+        sys.exit(1)
+
+    # Run list crawl
+    run_list_crawl(
+        recipe_path=args.recipe,
+        headless=headless,
+        dry_run=args.dry_run,
+        verbose_selectors=args.verbose_selectors,
+        force=args.force
+    )
+
+
+def _dump_html(url, headless):
+    """Dump HTML content for a URL."""
+    logger.info(f"Dumping HTML for: {url}")
+
+    crawler = WebCrawler(start_urls=[], max_depth=0, headless=headless)
+    try:
+        response = crawler.fetch_page(url)
+        if response:
+            output_file = Path("debug_dump.html")
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write(response.text)
+            logger.info(f"HTML saved to: {output_file}")
+        else:
+            logger.error("Failed to fetch page")
+    finally:
+        crawler._cleanup_browser()
+
+
+def _take_screenshot(url, headless):
+    """Take a screenshot of a URL."""
+    logger.info(f"Taking screenshot of: {url}")
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        logger.error("Playwright not available for screenshots")
+        sys.exit(1)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=headless if headless is not None else True)
+        page = browser.new_page()
+        page.goto(url, wait_until='domcontentloaded', timeout=60000)
+
+        output_file = Path("debug_screenshot.png")
+        page.screenshot(path=str(output_file), full_page=True)
+
+        browser.close()
+        logger.info(f"Screenshot saved to: {output_file}")
 
 
 if __name__ == "__main__":

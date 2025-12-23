@@ -1,0 +1,26 @@
+# Example recipe demonstrating "url_template" pagination strategy
+# This generates pagination URLs from a template
+
+start_urls:
+  - "http://quotes.toscrape.com/page/1/"
+
+# Scope to individual quote containers
+list_scope_css: "div.quote"
+
+# Extract author links
+item_link_css: "span a[href]"
+
+pagination:
+  type: url_template
+  page_param: page
+  page_start: 1
+  page_end: 10
+
+limits:
+  max_list_pages: 10
+  max_items: 200
+
+output:
+  items_jsonl: "output/quotes_template_items.jsonl"
+  pages_jsonl: "output/quotes_template_pages.jsonl"
+

@@ -82,5 +82,12 @@ transcripts/**/*
 crawled_pages/
 discovered_links.json
 
+# List crawl output (generated data)
+output/
+
+# Debug files
+debug_dump.html
+debug_screenshot.png
+
 # Browser session data
 **/browser_session/

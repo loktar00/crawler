@@ -1,0 +1,24 @@
+# Example recipe for quotes.toscrape.com
+# This demonstrates the "next button" pagination strategy
+
+start_urls:
+  - "http://quotes.toscrape.com/"
+
+# Scope to individual quote containers
+list_scope_css: "div.quote"
+
+# Extract author links from each quote
+item_link_css: "span a[href]"
+
+pagination:
+  type: next
+  next_css: "li.next a"
+
+limits:
+  max_list_pages: 5
+  max_items: 100
+
+output:
+  items_jsonl: "output/quotes_items.jsonl"
+  pages_jsonl: "output/quotes_pages.jsonl"
+

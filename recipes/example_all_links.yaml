@@ -1,0 +1,24 @@
+# Example recipe demonstrating "all_links" pagination strategy
+# This extracts all pagination links from a container
+
+start_urls:
+  - "http://quotes.toscrape.com/"
+
+# Scope to individual quote containers
+list_scope_css: "div.quote"
+
+# Extract quote text links (or any links within quotes)
+item_link_css: "a[href]"
+
+pagination:
+  type: all_links
+  pagination_scope_css: "ul.pager"
+
+limits:
+  max_list_pages: 10
+  max_items: 200
+
+output:
+  items_jsonl: "output/quotes_all_links_items.jsonl"
+  pages_jsonl: "output/quotes_all_links_pages.jsonl"
+

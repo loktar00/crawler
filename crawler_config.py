@@ -5,7 +5,7 @@ Configuration settings for generic web crawler.
 # Starting URLs - list of URLs to begin crawling from
 # Can be empty if URLs are provided via command line
 START_URLS = [
-    # "https://example.com",
+    "https://stackoverflow.com/users/322395/loktar?tab=answers",
 ]
 
 # Maximum crawl depth (None = unlimited)
