@@ -117,6 +117,13 @@ class CrawlRequest(BaseModel):
     headless: bool = True
 
 
+class FullCrawlRequest(BaseModel):
+    urls: list[str]
+    max_depth: int = Field(default=2, ge=0, le=10)
+    allowed_domains: list[str] = Field(default_factory=list)
+    headless: bool = True
+
+
 # --- Helpers ---
 
 
@@ -717,6 +724,73 @@ async def _run_crawl(task_id: str, recipe_path: str, headless: bool):
     crawl_tasks[task_id]["finished_at"] = datetime.now(timezone.utc).isoformat()
 
 
+async def _run_full_crawl(
+    task_id: str,
+    urls: list[str],
+    max_depth: int,
+    allowed_domains: list[str],
+    headless: bool,
+):
+    """Background coroutine: runs crawler.py --mode crawl."""
+    cmd = [
+        VENV_PYTHON, "crawler.py",
+        "--mode", "crawl",
+        "--urls", *urls,
+        "--max-depth", str(max_depth),
+    ]
+    if allowed_domains:
+        cmd.extend(["--domains", *allowed_domains])
+    if headless:
+        cmd.append("--headless")
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        cwd=WORKING_DIR,
+        env={**os.environ, "DISPLAY": ":99"},
+    )
+
+    crawl_tasks[task_id]["pid"] = proc.pid
+    lines = crawl_tasks[task_id]["log_lines"]
+
+    async for line in proc.stdout:
+        text = line.decode("utf-8", errors="replace").rstrip()
+        lines.append(text)
+
+    await proc.wait()
+    crawl_tasks[task_id]["returncode"] = proc.returncode
+    crawl_tasks[task_id]["status"] = "completed" if proc.returncode == 0 else "failed"
+    crawl_tasks[task_id]["finished_at"] = datetime.now(timezone.utc).isoformat()
+
+
+@app.post("/api/crawl/full")
+async def start_full_crawl(req: FullCrawlRequest):
+    """Start a full HTML crawl as a background task."""
+    if not req.urls:
+        raise HTTPException(status_code=400, detail="At least one URL required")
+
+    task_id = str(uuid.uuid4())[:8]
+    crawl_tasks[task_id] = {
+        "task_id": task_id,
+        "mode": "full",
+        "urls": req.urls,
+        "max_depth": req.max_depth,
+        "headless": req.headless,
+        "status": "running",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "finished_at": None,
+        "pid": None,
+        "returncode": None,
+        "log_lines": [],
+    }
+
+    asyncio.create_task(
+        _run_full_crawl(task_id, req.urls, req.max_depth, req.allowed_domains, req.headless)
+    )
+    return {"task_id": task_id, "status": "running"}
+
+
 @app.post("/api/crawl")
 async def start_crawl(req: CrawlRequest):
     """Start a crawl as a background task."""
@@ -729,6 +803,7 @@ async def start_crawl(req: CrawlRequest):
     task_id = str(uuid.uuid4())[:8]
     crawl_tasks[task_id] = {
         "task_id": task_id,
+        "mode": "list",
         "recipe_path": req.recipe_path,
         "headless": req.headless,
         "status": "running",
@@ -761,7 +836,9 @@ async def get_crawl_task(task_id: str, tail: int = 50):
     t = crawl_tasks[task_id]
     return {
         "task_id": t["task_id"],
-        "recipe_path": t["recipe_path"],
+        "mode": t.get("mode", "list"),
+        "recipe_path": t.get("recipe_path"),
+        "urls": t.get("urls"),
         "status": t["status"],
         "started_at": t["started_at"],
         "finished_at": t["finished_at"],
@@ -769,6 +846,261 @@ async def get_crawl_task(task_id: str, tail: int = 50):
         "log_count": len(t["log_lines"]),
         "log_tail": t["log_lines"][-tail:],
     }
+
+
+# --- Workflow Management ---
+
+WORKFLOWS_DIR = Path("/opt/crawler/workflows")
+WORKFLOWS_DIR.mkdir(exist_ok=True)
+
+workflow_runs: dict[str, dict] = {}
+
+
+class WorkflowSaveRequest(BaseModel):
+    name: str
+    description: str = ""
+    recorded_from: str = ""
+    input_schema: dict = Field(default_factory=dict)
+    steps: list[dict] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+
+
+class WorkflowRunRequest(BaseModel):
+    inputs: dict[str, str] = Field(default_factory=dict)
+    headless: bool = True
+
+
+class WorkflowRecordRequest(BaseModel):
+    prompt: str
+    name: str = ""
+    description: str = ""
+    timeout: int = Field(default=300, le=600)
+
+
+@app.get("/api/workflows")
+async def list_workflows():
+    """List all saved workflows."""
+    workflows = []
+    for path in sorted(WORKFLOWS_DIR.glob("*.json")):
+        try:
+            data = json.loads(path.read_text())
+            workflows.append({
+                "name": data.get("name", path.stem),
+                "description": data.get("description", ""),
+                "step_count": len(data.get("steps", [])),
+                "tags": data.get("tags", []),
+                "created_at": data.get("created_at", ""),
+            })
+        except Exception:
+            continue
+    return workflows
+
+
+@app.get("/api/workflows/runs")
+async def list_workflow_runs():
+    """List all workflow runs."""
+    return [
+        {k: v for k, v in r.items() if k != "log_lines"}
+        | {"log_count": len(r.get("log_lines", []))}
+        for r in workflow_runs.values()
+    ]
+
+
+@app.get("/api/workflows/runs/{run_id}")
+async def get_workflow_run(run_id: str, tail: int = 50):
+    """Get workflow run status and log tail."""
+    if run_id not in workflow_runs:
+        raise HTTPException(status_code=404, detail="Run not found")
+    r = workflow_runs[run_id]
+    return {
+        "run_id": r["run_id"],
+        "workflow_name": r["workflow_name"],
+        "status": r["status"],
+        "started_at": r["started_at"],
+        "finished_at": r.get("finished_at"),
+        "log_count": len(r.get("log_lines", [])),
+        "log_tail": r.get("log_lines", [])[-tail:],
+    }
+
+
+@app.get("/api/workflows/{name}")
+async def get_workflow(name: str):
+    """Get full workflow JSON."""
+    safe = name.replace("/", "_").replace("..", "_")
+    path = WORKFLOWS_DIR / f"{safe}.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    return json.loads(path.read_text())
+
+
+@app.post("/api/workflows")
+async def save_workflow(req: WorkflowSaveRequest):
+    """Save a workflow."""
+    safe = req.name.replace("/", "_").replace("..", "_")
+    if not safe:
+        raise HTTPException(status_code=400, detail="Name is required")
+    path = WORKFLOWS_DIR / f"{safe}.json"
+    data = {
+        "name": req.name,
+        "description": req.description,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "recorded_from": req.recorded_from,
+        "input_schema": req.input_schema,
+        "steps": req.steps,
+        "tags": req.tags,
+    }
+    path.write_text(json.dumps(data, indent=2))
+    return {"status": "saved", "name": req.name}
+
+
+RECORDING_SYSTEM_PROMPT = """You are a web automation recorder. Perform the user's task using ONLY Playwright MCP tools.
+
+Rules:
+- Take a browser_snapshot before each interaction to see the current page state
+- Use CSS selectors, data-testid, or aria-label for element identification when possible
+- Be methodical: navigate, observe, act, verify
+- After completing the task, take a final snapshot to confirm success
+- Do NOT explain what you're doing — just perform the actions
+"""
+
+RECORDING_TOOLS = [
+    "mcp__playwright__browser_navigate",
+    "mcp__playwright__browser_click",
+    "mcp__playwright__browser_type",
+    "mcp__playwright__browser_snapshot",
+    "mcp__playwright__browser_take_screenshot",
+    "mcp__playwright__browser_press_key",
+    "mcp__playwright__browser_hover",
+    "mcp__playwright__browser_select_option",
+    "mcp__playwright__browser_fill_form",
+    "mcp__playwright__browser_wait_for",
+    "mcp__playwright__browser_evaluate",
+    "mcp__playwright__browser_file_upload",
+    "mcp__playwright__browser_handle_dialog",
+    "mcp__playwright__browser_navigate_back",
+    "mcp__playwright__browser_tabs",
+    "mcp__playwright__browser_drag",
+    "mcp__playwright__browser_resize",
+    "mcp__playwright__browser_console_messages",
+    "mcp__playwright__browser_network_requests",
+]
+
+
+@app.post("/api/workflows/record")
+async def record_workflow(req: WorkflowRecordRequest):
+    """
+    Start an AI-driven recording session. Claude performs the task using
+    Playwright MCP tools. Returns SSE stream with progress, then final
+    workflow steps.
+    """
+    from workflow_recorder import stream_to_steps
+
+    async def event_generator():
+        cmd = [
+            CLAUDE_BIN, "-p", req.prompt,
+            "--output-format", "stream-json",
+            "--verbose",
+            "--append-system-prompt", RECORDING_SYSTEM_PROMPT,
+        ]
+        for tool in RECORDING_TOOLS:
+            cmd.extend(["--allowedTools", tool])
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=WORKING_DIR,
+            env={**os.environ, "DISPLAY": ":99"},
+        )
+
+        raw_lines: list[str] = []
+
+        try:
+            async for line in proc.stdout:
+                text = line.decode("utf-8", errors="replace").strip()
+                if text:
+                    raw_lines.append(text)
+                    # Forward to client for live viewing
+                    yield f"data: {text}\n\n"
+        except asyncio.CancelledError:
+            proc.kill()
+            raise
+        finally:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=10)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+
+        # Parse raw stream into workflow steps
+        steps = stream_to_steps(raw_lines)
+        steps_json = [s.model_dump() for s in steps]
+
+        result = {
+            "type": "workflow_result",
+            "name": req.name or "",
+            "description": req.description or "",
+            "recorded_from": req.prompt,
+            "steps": steps_json,
+        }
+        yield f"data: {json.dumps(result)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.delete("/api/workflows/{name}")
+async def delete_workflow(name: str):
+    """Delete a workflow."""
+    safe = name.replace("/", "_").replace("..", "_")
+    path = WORKFLOWS_DIR / f"{safe}.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    path.unlink()
+    return {"status": "deleted", "name": name}
+
+
+@app.post("/api/workflows/{name}/run")
+async def run_workflow(name: str, req: WorkflowRunRequest):
+    """Run a saved workflow with provided inputs."""
+    safe = name.replace("/", "_").replace("..", "_")
+    path = WORKFLOWS_DIR / f"{safe}.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Workflow not found")
+
+    data = json.loads(path.read_text())
+
+    run_id = str(uuid.uuid4())[:8]
+    workflow_runs[run_id] = {
+        "run_id": run_id,
+        "workflow_name": name,
+        "status": "running",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "finished_at": None,
+        "log_lines": [],
+    }
+
+    async def _run():
+        from workflow_engine import WorkflowPlayer
+        from workflow_models import Workflow
+
+        workflow = Workflow(**data)
+        player = WorkflowPlayer(
+            workflow=workflow,
+            inputs=req.inputs,
+            headless=req.headless,
+        )
+        result = await asyncio.to_thread(player.run)
+        workflow_runs[run_id]["log_lines"] = result.get("log", [])
+        workflow_runs[run_id]["status"] = result.get("status", "failed")
+        workflow_runs[run_id]["finished_at"] = datetime.now(timezone.utc).isoformat()
+
+    asyncio.create_task(_run())
+    return {"run_id": run_id, "status": "running"}
 
 
 # --- Output Files ---

@@ -218,6 +218,7 @@
   <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
   <button class="tab-btn" data-tab="recipes">Recipes</button>
   <button class="tab-btn" data-tab="crawl">Run Crawl</button>
+  <button class="tab-btn" data-tab="workflows">Workflows</button>
   <button class="tab-btn" data-tab="login">Login</button>
   <button class="tab-btn" data-tab="files">Files</button>
   <button class="tab-btn" data-tab="browser">Browser View</button>
@@ -371,6 +372,13 @@
   <div class="tab-content" id="tab-crawl">
     <div class="crawl-controls">
       <div class="form-group">
+        <label>Mode</label>
+        <select id="crawl-mode" onchange="toggleCrawlMode()" style="min-width:180px;">
+          <option value="list">List Crawl (Recipe)</option>
+          <option value="full">Full HTML Crawl</option>
+        </select>
+      </div>
+      <div id="crawl-list-fields" class="form-group">
         <label>Recipe</label>
         <select id="crawl-recipe"></select>
       </div>
@@ -378,6 +386,24 @@
         <label><input type="checkbox" id="crawl-headless" checked> Headless</label>
       </div>
       <button class="btn btn-primary" onclick="startCrawl()">Start Crawl</button>
+    </div>
+    <div id="crawl-full-fields" class="hidden" style="margin-bottom:20px;">
+      <div class="form-section">
+        <div class="form-group">
+          <label>URLs (one per line)</label>
+          <textarea id="crawl-full-urls" rows="3" placeholder="https://example.com"></textarea>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Max Depth</label>
+            <input type="number" id="crawl-full-depth" value="2" min="0" max="10">
+          </div>
+          <div class="form-group">
+            <label>Allowed Domains (comma-separated, blank = same as URL)</label>
+            <input type="text" id="crawl-full-domains" placeholder="example.com, sub.example.com">
+          </div>
+        </div>
+      </div>
     </div>
 
     <h2 style="font-size:16px; margin-bottom:12px;">Tasks</h2>
@@ -393,6 +419,100 @@
       </div>
       <div class="log-viewer" id="log-output"></div>
     </div>
+  </div>
+
+  <!-- TAB: Workflows -->
+  <div class="tab-content" id="tab-workflows">
+
+    <!-- Workflow List -->
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+      <h2 style="font-size:16px;">Saved Workflows</h2>
+      <button class="btn btn-primary" onclick="toggleRecordSection()">+ Record New</button>
+    </div>
+    <table id="wf-table">
+      <thead><tr><th>Name</th><th>Description</th><th>Steps</th><th>Tags</th><th>Actions</th></tr></thead>
+      <tbody></tbody>
+    </table>
+
+    <!-- Record Section (hidden by default) -->
+    <div id="wf-record-section" class="hidden" style="margin-top:24px;">
+      <div class="form-section" style="border-color:var(--accent);">
+        <h3>Record Workflow</h3>
+        <p style="color:var(--text2); font-size:13px; margin-bottom:12px;">
+          Describe a task in English. Claude will perform it using the live browser, and
+          the steps will be recorded as a replayable workflow.
+        </p>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Workflow Name</label>
+            <input type="text" id="wf-rec-name" placeholder="e.g. post_tweet">
+          </div>
+          <div class="form-group">
+            <label>Description (optional)</label>
+            <input type="text" id="wf-rec-desc" placeholder="What this workflow does">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Task Prompt</label>
+          <textarea id="wf-rec-prompt" rows="3" placeholder="Describe what the workflow should do..."></textarea>
+        </div>
+        <div style="display:flex; gap:8px; margin-bottom:12px;">
+          <button class="btn btn-primary" id="wf-rec-start-btn" onclick="startRecording()">Start Recording</button>
+          <button class="btn" style="background:var(--surface2)" onclick="toggleRecordSection()">Cancel</button>
+        </div>
+        <div id="wf-rec-log-section" class="hidden">
+          <h4 style="font-size:13px; color:var(--text2); margin-bottom:8px;">Recording Log</h4>
+          <div class="log-viewer" id="wf-rec-log" style="max-height:300px;"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Step Editor (shown after recording) -->
+    <div id="wf-step-editor" class="hidden" style="margin-top:24px;">
+      <div class="form-section">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+          <h3>Recorded Steps</h3>
+          <div style="display:flex; gap:8px;">
+            <button class="btn btn-primary" onclick="saveRecordedWorkflow()">Save Workflow</button>
+            <button class="btn" style="background:var(--surface2)" onclick="discardRecording()">Discard</button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Input Fields (JSON, e.g. {"text": {"type":"string","description":"Tweet content","required":true}})</label>
+          <textarea id="wf-step-inputs" rows="2" placeholder="{}"></textarea>
+        </div>
+        <div class="form-group">
+          <label>Tags (comma-separated)</label>
+          <input type="text" id="wf-step-tags" placeholder="social, twitter">
+        </div>
+        <table id="wf-steps-table">
+          <thead><tr><th>#</th><th>Action</th><th>Description</th><th>Params</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Run Section (shown when clicking Run on a workflow) -->
+    <div id="wf-run-section" class="hidden" style="margin-top:24px;">
+      <div class="form-section">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+          <h3>Run: <span id="wf-run-name"></span></h3>
+          <button class="btn btn-sm" style="background:var(--surface2)" onclick="closeRunSection()">Close</button>
+        </div>
+        <div id="wf-run-inputs"></div>
+        <div class="form-group" style="margin-top:8px;">
+          <label><input type="checkbox" id="wf-run-headless" checked> Headless</label>
+        </div>
+        <div style="display:flex; gap:8px; margin-bottom:12px;">
+          <button class="btn btn-primary" id="wf-run-btn" onclick="executeWorkflow()">Run Workflow</button>
+        </div>
+        <div id="wf-run-log-section" class="hidden">
+          <h4 style="font-size:13px; color:var(--text2); margin-bottom:8px;">Run Log</h4>
+          <div class="log-viewer" id="wf-run-log" style="max-height:300px;"></div>
+        </div>
+      </div>
+    </div>
+
   </div>
 
   <!-- TAB: Login -->
@@ -502,6 +622,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     if (tab === 'dashboard') refreshDashboard();
     if (tab === 'recipes') loadRecipes();
     if (tab === 'crawl') { loadCrawlRecipes(); loadCrawlTasks(); }
+    if (tab === 'workflows') loadWorkflows();
     if (tab === 'login') { refreshLoginStatus(); loadSavedSessions(); }
     if (tab === 'files') loadFiles('');
   });
@@ -686,6 +807,12 @@ async function runRecipe(path) {
 }
 
 // --- Crawl ---
+function toggleCrawlMode() {
+  const mode = document.getElementById('crawl-mode').value;
+  document.getElementById('crawl-list-fields').classList.toggle('hidden', mode !== 'list');
+  document.getElementById('crawl-full-fields').classList.toggle('hidden', mode !== 'full');
+}
+
 async function loadCrawlRecipes() {
   try {
     const recipes = await api('/api/recipes');
@@ -705,8 +832,8 @@ async function loadCrawlTasks() {
     tbody.innerHTML = tasks.slice().reverse().map(t => `
       <tr>
         <td><code>${t.task_id}</code></td>
-        <td>${esc(t.recipe_path)}</td>
-        <td><span class="badge badge-${t.status}">${t.status}</span></td>
+        <td>${esc(t.recipe_path || (t.urls || []).join(', ') || '-')}</td>
+        <td><span class="badge badge-${t.status === 'running' ? 'running' : t.status}">${t.status}</span></td>
         <td>${new Date(t.started_at).toLocaleString()}</td>
         <td><button class="btn btn-sm" style="background:var(--surface2)" onclick="viewLog('${t.task_id}')">Log</button></td>
       </tr>
@@ -715,15 +842,30 @@ async function loadCrawlTasks() {
 }
 
 async function startCrawl() {
-  const path = document.getElementById('crawl-recipe').value;
-  if (!path) { toast('Select a recipe', 'error'); return; }
+  const mode = document.getElementById('crawl-mode').value;
   const headless = document.getElementById('crawl-headless').checked;
 
   try {
-    const res = await api('/api/crawl', {
-      method: 'POST',
-      body: JSON.stringify({ recipe_path: path, headless }),
-    });
+    let res;
+    if (mode === 'full') {
+      const urlsRaw = document.getElementById('crawl-full-urls').value.trim();
+      const urls = urlsRaw.split('\n').map(u => u.trim()).filter(Boolean);
+      if (!urls.length) { toast('Enter at least one URL', 'error'); return; }
+      const maxDepth = parseInt(document.getElementById('crawl-full-depth').value) || 2;
+      const domainsRaw = document.getElementById('crawl-full-domains').value.trim();
+      const domains = domainsRaw ? domainsRaw.split(',').map(d => d.trim()).filter(Boolean) : [];
+      res = await api('/api/crawl/full', {
+        method: 'POST',
+        body: JSON.stringify({ urls, max_depth: maxDepth, allowed_domains: domains, headless }),
+      });
+    } else {
+      const path = document.getElementById('crawl-recipe').value;
+      if (!path) { toast('Select a recipe', 'error'); return; }
+      res = await api('/api/crawl', {
+        method: 'POST',
+        body: JSON.stringify({ recipe_path: path, headless }),
+      });
+    }
     toast(`Crawl started: ${res.task_id}`);
     loadCrawlTasks();
     viewLog(res.task_id);
@@ -764,6 +906,314 @@ function viewLog(taskId) {
 function closeLog() {
   document.getElementById('log-section').classList.add('hidden');
   if (logPollInterval) { clearInterval(logPollInterval); logPollInterval = null; }
+}
+
+// --- Workflows ---
+let recordedSteps = null;
+let recordedMeta = null;
+let wfRunPollInterval = null;
+let currentRunWorkflow = null;
+
+async function loadWorkflows() {
+  try {
+    const workflows = await api('/api/workflows');
+    const tbody = document.querySelector('#wf-table tbody');
+    if (!workflows.length) {
+      tbody.innerHTML = '<tr><td colspan="5" style="color:var(--text2);text-align:center;padding:24px;">No workflows yet. Click "Record New" to create one.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = workflows.map(w => `
+      <tr>
+        <td><strong>${esc(w.name)}</strong></td>
+        <td style="color:var(--text2); font-size:13px;">${esc(w.description || '-')}</td>
+        <td>${w.step_count}</td>
+        <td>${(w.tags || []).map(t => `<span class="badge badge-completed" style="margin-right:4px;">${esc(t)}</span>`).join('') || '-'}</td>
+        <td style="white-space:nowrap;">
+          <button class="btn btn-sm btn-primary" onclick="openRunWorkflow('${esc(w.name)}')">Run</button>
+          <button class="btn btn-sm" style="background:var(--surface2)" onclick="viewWorkflow('${esc(w.name)}')">View</button>
+          <button class="btn btn-sm btn-danger" onclick="deleteWorkflow('${esc(w.name)}')">Delete</button>
+        </td>
+      </tr>
+    `).join('');
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function toggleRecordSection() {
+  const el = document.getElementById('wf-record-section');
+  el.classList.toggle('hidden');
+  if (el.classList.contains('hidden')) {
+    document.getElementById('wf-rec-log-section').classList.add('hidden');
+    document.getElementById('wf-rec-log').textContent = '';
+  }
+}
+
+async function startRecording() {
+  const prompt = document.getElementById('wf-rec-prompt').value.trim();
+  if (!prompt) { toast('Enter a task prompt', 'error'); return; }
+
+  const name = document.getElementById('wf-rec-name').value.trim();
+  const desc = document.getElementById('wf-rec-desc').value.trim();
+
+  const btn = document.getElementById('wf-rec-start-btn');
+  btn.disabled = true;
+  btn.textContent = 'Recording...';
+
+  const logEl = document.getElementById('wf-rec-log');
+  const logSection = document.getElementById('wf-rec-log-section');
+  logSection.classList.remove('hidden');
+  logEl.textContent = 'Starting recording...\n';
+
+  recordedSteps = null;
+  recordedMeta = null;
+
+  try {
+    const res = await fetch(API + '/api/workflows/record', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, name, description: desc }),
+    });
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const payload = line.slice(6).trim();
+        if (payload === '[DONE]') continue;
+
+        try {
+          const data = JSON.parse(payload);
+
+          // Check for final workflow_result
+          if (data.type === 'workflow_result') {
+            recordedSteps = data.steps;
+            recordedMeta = { name: data.name, description: data.description, recorded_from: data.recorded_from };
+            logEl.textContent += `\n--- Recording complete: ${data.steps.length} steps extracted ---\n`;
+            continue;
+          }
+
+          // Show assistant text or tool use for live feedback
+          if (data.type === 'assistant' && data.message) {
+            const blocks = data.message.content || [];
+            for (const b of blocks) {
+              if (b.type === 'text') {
+                logEl.textContent += b.text + '\n';
+              } else if (b.type === 'tool_use') {
+                logEl.textContent += `[Tool] ${b.name}(${JSON.stringify(b.input).substring(0, 120)})\n`;
+              }
+            }
+          } else if (data.type === 'result') {
+            logEl.textContent += `\n[Result] ${(data.result || '').substring(0, 200)}\n`;
+          }
+        } catch {
+          // Not JSON, skip
+        }
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+    }
+
+    // Show step editor if we got steps
+    if (recordedSteps && recordedSteps.length > 0) {
+      showStepEditor();
+      toast(`Recorded ${recordedSteps.length} steps`);
+    } else {
+      toast('No steps were recorded', 'error');
+    }
+  } catch (e) {
+    toast(`Recording failed: ${e.message}`, 'error');
+    logEl.textContent += `\nERROR: ${e.message}\n`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Start Recording';
+  }
+}
+
+function showStepEditor() {
+  const editor = document.getElementById('wf-step-editor');
+  editor.classList.remove('hidden');
+
+  // Pre-fill name/desc from meta
+  if (recordedMeta) {
+    if (recordedMeta.name) document.getElementById('wf-rec-name').value = recordedMeta.name;
+  }
+
+  document.getElementById('wf-step-inputs').value = '{}';
+  document.getElementById('wf-step-tags').value = '';
+
+  const tbody = document.querySelector('#wf-steps-table tbody');
+  tbody.innerHTML = recordedSteps.map(s => `
+    <tr>
+      <td>${s.seq}</td>
+      <td><code>${esc(s.action)}</code></td>
+      <td>${esc(s.description || '')}</td>
+      <td style="font-size:12px; max-width:400px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${esc(JSON.stringify(s.params))}</td>
+    </tr>
+  `).join('');
+}
+
+async function saveRecordedWorkflow() {
+  const name = document.getElementById('wf-rec-name').value.trim();
+  if (!name) { toast('Enter a workflow name', 'error'); return; }
+  if (!recordedSteps || !recordedSteps.length) { toast('No steps to save', 'error'); return; }
+
+  let inputSchema = {};
+  try {
+    inputSchema = JSON.parse(document.getElementById('wf-step-inputs').value || '{}');
+  } catch { toast('Invalid input schema JSON', 'error'); return; }
+
+  const tagsRaw = document.getElementById('wf-step-tags').value.trim();
+  const tags = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean) : [];
+
+  try {
+    await api('/api/workflows', {
+      method: 'POST',
+      body: JSON.stringify({
+        name,
+        description: document.getElementById('wf-rec-desc').value.trim(),
+        recorded_from: recordedMeta?.recorded_from || '',
+        input_schema: inputSchema,
+        steps: recordedSteps,
+        tags,
+      }),
+    });
+    toast('Workflow saved');
+    discardRecording();
+    loadWorkflows();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function discardRecording() {
+  recordedSteps = null;
+  recordedMeta = null;
+  document.getElementById('wf-step-editor').classList.add('hidden');
+  document.getElementById('wf-record-section').classList.add('hidden');
+  document.getElementById('wf-rec-log-section').classList.add('hidden');
+  document.getElementById('wf-rec-log').textContent = '';
+}
+
+async function deleteWorkflow(name) {
+  if (!confirm(`Delete workflow "${name}"?`)) return;
+  try {
+    await api(`/api/workflows/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    toast('Workflow deleted');
+    loadWorkflows();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function viewWorkflow(name) {
+  try {
+    const wf = await api(`/api/workflows/${encodeURIComponent(name)}`);
+    // Show in step editor (read-only view)
+    recordedSteps = wf.steps;
+    recordedMeta = { name: wf.name, description: wf.description, recorded_from: wf.recorded_from };
+    document.getElementById('wf-rec-name').value = wf.name;
+    document.getElementById('wf-rec-desc').value = wf.description || '';
+    showStepEditor();
+    document.getElementById('wf-step-inputs').value = JSON.stringify(wf.input_schema || {}, null, 2);
+    document.getElementById('wf-step-tags').value = (wf.tags || []).join(', ');
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function openRunWorkflow(name) {
+  currentRunWorkflow = name;
+  document.getElementById('wf-run-name').textContent = name;
+  document.getElementById('wf-run-log-section').classList.add('hidden');
+  document.getElementById('wf-run-log').textContent = '';
+
+  // Fetch workflow to build input form
+  try {
+    const wf = await api(`/api/workflows/${encodeURIComponent(name)}`);
+    const inputsDiv = document.getElementById('wf-run-inputs');
+    const schema = wf.input_schema || {};
+    const fields = Object.entries(schema);
+
+    if (fields.length === 0) {
+      inputsDiv.innerHTML = '<p style="color:var(--text2); font-size:13px;">No inputs required.</p>';
+    } else {
+      inputsDiv.innerHTML = fields.map(([key, def]) => `
+        <div class="form-group">
+          <label>${esc(key)}${def.required ? ' *' : ''} <span style="color:var(--text2);font-size:12px;">${esc(def.description || '')}</span></label>
+          <input type="text" id="wf-input-${esc(key)}" data-wf-input="${esc(key)}" placeholder="${esc(def.default || '')}" value="${esc(def.default || '')}">
+        </div>
+      `).join('');
+    }
+
+    document.getElementById('wf-run-section').classList.remove('hidden');
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function closeRunSection() {
+  document.getElementById('wf-run-section').classList.add('hidden');
+  if (wfRunPollInterval) { clearInterval(wfRunPollInterval); wfRunPollInterval = null; }
+}
+
+async function executeWorkflow() {
+  if (!currentRunWorkflow) return;
+
+  // Gather inputs
+  const inputs = {};
+  document.querySelectorAll('[data-wf-input]').forEach(el => {
+    inputs[el.dataset.wfInput] = el.value;
+  });
+
+  const headless = document.getElementById('wf-run-headless').checked;
+  const btn = document.getElementById('wf-run-btn');
+  btn.disabled = true;
+
+  try {
+    const res = await api(`/api/workflows/${encodeURIComponent(currentRunWorkflow)}/run`, {
+      method: 'POST',
+      body: JSON.stringify({ inputs, headless }),
+    });
+    toast(`Workflow started: ${res.run_id}`);
+
+    // Show log and poll
+    const logSection = document.getElementById('wf-run-log-section');
+    logSection.classList.remove('hidden');
+    const logEl = document.getElementById('wf-run-log');
+    logEl.textContent = 'Running...\n';
+
+    if (wfRunPollInterval) clearInterval(wfRunPollInterval);
+
+    async function pollRun() {
+      try {
+        const data = await api(`/api/workflows/runs/${res.run_id}?tail=200`);
+        logEl.textContent = data.log_tail.join('\n') || '(no output yet)';
+        logEl.scrollTop = logEl.scrollHeight;
+        if (data.status !== 'running') {
+          clearInterval(wfRunPollInterval);
+          wfRunPollInterval = null;
+          btn.disabled = false;
+          toast(`Workflow ${data.status}`, data.status === 'completed' ? 'success' : 'error');
+        }
+      } catch { /* ignore */ }
+    }
+
+    pollRun();
+    wfRunPollInterval = setInterval(pollRun, 2000);
+  } catch (e) {
+    toast(e.message, 'error');
+    btn.disabled = false;
+  }
 }
 
 // --- Browser View ---
