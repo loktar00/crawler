@@ -1,0 +1,944 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Crawler Dashboard</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #252830;
+    --border: #2e3140;
+    --text: #e1e4ed;
+    --text2: #8b8fa3;
+    --accent: #6c8aff;
+    --accent-hover: #8ba3ff;
+    --green: #4ade80;
+    --red: #f87171;
+    --yellow: #fbbf24;
+    --radius: 8px;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+  /* Top bar */
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 24px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+  .topbar h1 {
+    font-size: 18px;
+    font-weight: 600;
+    margin-right: 32px;
+  }
+  .tab-btn {
+    padding: 8px 16px;
+    background: none;
+    border: none;
+    color: var(--text2);
+    font-size: 14px;
+    cursor: pointer;
+    border-radius: var(--radius);
+    transition: all .15s;
+  }
+  .tab-btn:hover { color: var(--text); background: var(--surface2); }
+  .tab-btn.active { color: var(--accent); background: var(--surface2); font-weight: 600; }
+
+  /* Main content */
+  .content { padding: 24px; max-width: 1400px; margin: 0 auto; }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
+
+  /* Cards */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+  }
+  .card-label { font-size: 12px; color: var(--text2); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 8px; }
+  .card-value { font-size: 28px; font-weight: 700; }
+  .card-value.ok { color: var(--green); }
+  .card-value.err { color: var(--red); }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 14px; }
+  th { color: var(--text2); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .5px; }
+  tr:hover td { background: var(--surface2); }
+
+  /* Buttons */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    font-size: 13px;
+    font-weight: 500;
+    border: none;
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: all .15s;
+    color: #fff;
+  }
+  .btn-primary { background: var(--accent); }
+  .btn-primary:hover { background: var(--accent-hover); }
+  .btn-danger { background: var(--red); }
+  .btn-danger:hover { opacity: .85; }
+  .btn-sm { padding: 4px 10px; font-size: 12px; }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+
+  /* Forms */
+  .form-group { margin-bottom: 16px; }
+  .form-group label { display: block; font-size: 13px; color: var(--text2); margin-bottom: 4px; }
+  .form-group input, .form-group textarea, .form-group select {
+    width: 100%;
+    padding: 8px 12px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text);
+    font-size: 14px;
+    font-family: inherit;
+  }
+  .form-group textarea { resize: vertical; min-height: 60px; }
+  .form-group input:focus, .form-group textarea:focus, .form-group select:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .form-section {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px;
+    margin-bottom: 20px;
+  }
+  .form-section h3 { font-size: 15px; margin-bottom: 16px; }
+  .hidden { display: none !important; }
+
+  /* Status badges */
+  .badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .badge-running { background: rgba(107,138,255,.2); color: var(--accent); }
+  .badge-completed { background: rgba(74,222,128,.2); color: var(--green); }
+  .badge-failed { background: rgba(248,113,113,.2); color: var(--red); }
+
+  /* Log viewer */
+  .log-viewer {
+    background: #0a0c10;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 12px;
+    line-height: 1.6;
+    max-height: 500px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: var(--text2);
+  }
+
+  /* Toast */
+  .toast-container { position: fixed; top: 16px; right: 16px; z-index: 9999; display: flex; flex-direction: column; gap: 8px; }
+  .toast {
+    padding: 12px 20px;
+    border-radius: var(--radius);
+    font-size: 14px;
+    animation: fadeIn .2s;
+    max-width: 400px;
+  }
+  .toast-success { background: rgba(74,222,128,.15); border: 1px solid var(--green); color: var(--green); }
+  .toast-error { background: rgba(248,113,113,.15); border: 1px solid var(--red); color: var(--red); }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
+
+  /* Browser view */
+  .vnc-frame {
+    width: 100%;
+    height: calc(100vh - 140px);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: #000;
+  }
+
+  /* Crawl controls */
+  .crawl-controls {
+    display: flex;
+    gap: 12px;
+    align-items: flex-end;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+  }
+  .crawl-controls .form-group { margin-bottom: 0; }
+  .crawl-controls select { min-width: 280px; }
+  .crawl-controls label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text2); cursor: pointer; }
+  .crawl-controls input[type="checkbox"] { accent-color: var(--accent); }
+
+  /* File browser */
+  .breadcrumb { display: flex; align-items: center; gap: 4px; margin-bottom: 16px; font-size: 14px; flex-wrap: wrap; }
+  .breadcrumb a { color: var(--accent); text-decoration: none; }
+  .breadcrumb a:hover { text-decoration: underline; }
+  .breadcrumb span { color: var(--text2); }
+  .file-preview {
+    background: #0a0c10;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 12px;
+    line-height: 1.6;
+    max-height: 600px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: var(--text2);
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>Crawler</h1>
+  <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
+  <button class="tab-btn" data-tab="recipes">Recipes</button>
+  <button class="tab-btn" data-tab="crawl">Run Crawl</button>
+  <button class="tab-btn" data-tab="login">Login</button>
+  <button class="tab-btn" data-tab="files">Files</button>
+  <button class="tab-btn" data-tab="browser">Browser View</button>
+</div>
+
+<div class="toast-container" id="toasts"></div>
+
+<div class="content">
+
+  <!-- TAB: Dashboard -->
+  <div class="tab-content active" id="tab-dashboard">
+    <div class="cards">
+      <div class="card">
+        <div class="card-label">API Status</div>
+        <div class="card-value" id="dash-api">...</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Recipes</div>
+        <div class="card-value" id="dash-recipes">...</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Running Tasks</div>
+        <div class="card-value" id="dash-running">0</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Completed Tasks</div>
+        <div class="card-value" id="dash-completed">0</div>
+      </div>
+      <div class="card">
+        <div class="card-label">Failed Tasks</div>
+        <div class="card-value" id="dash-failed">0</div>
+      </div>
+    </div>
+    <h2 style="margin-bottom:12px; font-size:16px;">Recent Crawl Tasks</h2>
+    <table id="dash-tasks-table">
+      <thead><tr><th>ID</th><th>Recipe</th><th>Status</th><th>Started</th><th>Log Lines</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <!-- TAB: Recipes -->
+  <div class="tab-content" id="tab-recipes">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+      <h2 style="font-size:16px;">Recipes</h2>
+      <button class="btn btn-primary" onclick="toggleRecipeForm()">+ New Recipe</button>
+    </div>
+
+    <!-- Recipe list -->
+    <table id="recipe-table">
+      <thead><tr><th>Name</th><th>Start URL</th><th>Pagination</th><th>Actions</th></tr></thead>
+      <tbody></tbody>
+    </table>
+
+    <!-- Create recipe form (hidden) -->
+    <div id="recipe-form" class="hidden" style="margin-top:24px;">
+      <div class="form-section">
+        <h3>Create Recipe</h3>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Recipe Name</label>
+            <input type="text" id="rf-name" placeholder="my_recipe">
+          </div>
+          <div class="form-group">
+            <label>Item Link CSS</label>
+            <input type="text" id="rf-item-link" value="a[href]">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Start URLs (one per line)</label>
+          <textarea id="rf-urls" rows="3" placeholder="https://example.com/page1"></textarea>
+        </div>
+        <div class="form-group">
+          <label>List Scope CSS</label>
+          <input type="text" id="rf-scope" placeholder="div.item">
+        </div>
+
+        <h3 style="margin-top:20px;">Pagination</h3>
+        <div class="form-group">
+          <label>Type</label>
+          <select id="rf-pag-type" onchange="updatePagFields()">
+            <option value="">None</option>
+            <option value="next">Next Button</option>
+            <option value="all_links">All Links</option>
+            <option value="url_template">URL Template</option>
+          </select>
+        </div>
+        <div id="pag-next" class="hidden">
+          <div class="form-group">
+            <label>Next Button CSS</label>
+            <input type="text" id="rf-next-css" placeholder="a.next-page">
+          </div>
+        </div>
+        <div id="pag-all-links" class="hidden">
+          <div class="form-group">
+            <label>Pagination Scope CSS</label>
+            <input type="text" id="rf-pag-scope" placeholder="nav.pagination a">
+          </div>
+        </div>
+        <div id="pag-url-template" class="hidden">
+          <div class="form-row">
+            <div class="form-group">
+              <label>Page Parameter</label>
+              <input type="text" id="rf-page-param" placeholder="page">
+            </div>
+            <div class="form-group" style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+              <div>
+                <label>Start</label>
+                <input type="number" id="rf-page-start" value="1">
+              </div>
+              <div>
+                <label>End</label>
+                <input type="number" id="rf-page-end" value="10">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <h3 style="margin-top:20px;">Limits</h3>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Max List Pages</label>
+            <input type="number" id="rf-max-pages" placeholder="10">
+          </div>
+          <div class="form-group">
+            <label>Max Items</label>
+            <input type="number" id="rf-max-items" placeholder="100">
+          </div>
+        </div>
+
+        <h3 style="margin-top:20px;">Output</h3>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Items JSONL</label>
+            <input type="text" id="rf-out-items" placeholder="auto-generated">
+          </div>
+          <div class="form-group">
+            <label>Pages JSONL</label>
+            <input type="text" id="rf-out-pages" placeholder="auto-generated">
+          </div>
+        </div>
+
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <button class="btn btn-primary" onclick="createRecipe()">Create Recipe</button>
+          <button class="btn" style="background:var(--surface2)" onclick="toggleRecipeForm()">Cancel</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TAB: Run Crawl -->
+  <div class="tab-content" id="tab-crawl">
+    <div class="crawl-controls">
+      <div class="form-group">
+        <label>Recipe</label>
+        <select id="crawl-recipe"></select>
+      </div>
+      <div class="form-group">
+        <label><input type="checkbox" id="crawl-headless" checked> Headless</label>
+      </div>
+      <button class="btn btn-primary" onclick="startCrawl()">Start Crawl</button>
+    </div>
+
+    <h2 style="font-size:16px; margin-bottom:12px;">Tasks</h2>
+    <table id="crawl-table">
+      <thead><tr><th>ID</th><th>Recipe</th><th>Status</th><th>Started</th><th>Actions</th></tr></thead>
+      <tbody></tbody>
+    </table>
+
+    <div id="log-section" class="hidden" style="margin-top:20px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+        <h2 style="font-size:16px;">Log: <span id="log-task-id"></span></h2>
+        <button class="btn btn-sm" style="background:var(--surface2)" onclick="closeLog()">Close</button>
+      </div>
+      <div class="log-viewer" id="log-output"></div>
+    </div>
+  </div>
+
+  <!-- TAB: Login -->
+  <div class="tab-content" id="tab-login">
+    <h2 style="font-size:16px; margin-bottom:16px;">Login to Sites</h2>
+    <p style="color:var(--text2); font-size:14px; margin-bottom:20px;">
+      Open a site in the live browser, log in manually via the Browser View tab, then save your session.
+      Cookies are stored and reused by all future headless crawl runs.
+    </p>
+
+    <div class="form-section">
+      <h3>Open Login Page</h3>
+      <div class="form-row">
+        <div class="form-group">
+          <label>URL</label>
+          <input type="text" id="login-url" placeholder="https://www.ebay.com/signin">
+        </div>
+        <div class="form-group">
+          <label>Label (optional)</label>
+          <input type="text" id="login-label" placeholder="eBay">
+        </div>
+      </div>
+      <div style="display:flex; gap:8px; margin-top:4px;">
+        <button class="btn btn-primary" id="login-open-btn" onclick="loginOpen()">Open Browser</button>
+      </div>
+    </div>
+
+    <div id="login-active-section" class="hidden" style="margin-top:20px;">
+      <div class="form-section" style="border-color:var(--accent);">
+        <h3>Active Login Session</h3>
+        <p style="color:var(--text2); font-size:14px; margin-bottom:12px;">
+          Site: <strong id="login-active-label"></strong><br>
+          <span style="font-size:12px;" id="login-active-url"></span>
+        </p>
+        <p style="color:var(--yellow); font-size:13px; margin-bottom:16px;">
+          Switch to the <strong>Browser View</strong> tab to log in, then come back here and click Save Session.
+        </p>
+        <div style="display:flex; gap:8px;">
+          <button class="btn btn-primary" onclick="loginSave()">Save Session</button>
+          <button class="btn btn-danger" onclick="loginCancel()">Cancel</button>
+          <button class="btn" style="background:var(--surface2)" onclick="switchToBrowser()">Go to Browser View</button>
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-top:24px;">
+      <h3 style="font-size:15px; margin-bottom:12px;">Saved Sessions</h3>
+      <p style="color:var(--text2); font-size:13px; margin-bottom:12px;" id="login-cookie-count"></p>
+      <div id="login-domains" style="display:flex; flex-wrap:wrap; gap:8px;"></div>
+    </div>
+  </div>
+
+  <!-- TAB: Files -->
+  <div class="tab-content" id="tab-files">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:4px;">
+      <h2 style="font-size:16px;">Output Files</h2>
+    </div>
+    <div class="breadcrumb" id="files-breadcrumb"></div>
+    <table id="files-table">
+      <thead><tr><th>Name</th><th>Size</th><th>Modified</th><th>Actions</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div id="file-preview-section" class="hidden" style="margin-top:20px;">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+        <h3 style="font-size:14px;" id="preview-filename"></h3>
+        <div style="display:flex; gap:8px;">
+          <button class="btn btn-sm btn-primary" id="preview-download-btn">Download</button>
+          <button class="btn btn-sm" style="background:var(--surface2)" onclick="closePreview()">Close</button>
+        </div>
+      </div>
+      <div class="file-preview" id="file-preview-content"></div>
+    </div>
+  </div>
+
+  <!-- TAB: Browser View -->
+  <div class="tab-content" id="tab-browser">
+    <div style="display:flex; gap:12px; align-items:center; margin-bottom:12px;">
+      <h2 style="font-size:16px;">Live Browser (Xvfb :99)</h2>
+      <button class="btn btn-sm btn-primary" onclick="reconnectVNC()">Reconnect</button>
+    </div>
+    <iframe id="vnc-iframe" class="vnc-frame" sandbox="allow-scripts allow-same-origin allow-popups"></iframe>
+  </div>
+
+</div>
+
+<script>
+// --- Config ---
+const API = window.location.origin;
+const VNC_PORT = 6080;
+const VNC_BASE = `${window.location.protocol}//${window.location.hostname}:${VNC_PORT}`;
+
+// --- Tab navigation ---
+let vncLoaded = false;
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+    btn.classList.add('active');
+    const tab = btn.dataset.tab;
+    document.getElementById('tab-' + tab).classList.add('active');
+
+    if (tab === 'browser' && !vncLoaded) {
+      document.getElementById('vnc-iframe').src =
+        `${VNC_BASE}/vnc.html?autoconnect=true&resize=scale&reconnect=true&reconnect_delay=1000`;
+      vncLoaded = true;
+    }
+    if (tab === 'dashboard') refreshDashboard();
+    if (tab === 'recipes') loadRecipes();
+    if (tab === 'crawl') { loadCrawlRecipes(); loadCrawlTasks(); }
+    if (tab === 'login') { refreshLoginStatus(); loadSavedSessions(); }
+    if (tab === 'files') loadFiles('');
+  });
+});
+
+// --- Toast ---
+function toast(msg, type = 'success') {
+  const el = document.createElement('div');
+  el.className = `toast toast-${type}`;
+  el.textContent = msg;
+  document.getElementById('toasts').appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
+// --- API helpers ---
+async function api(path, opts = {}) {
+  const res = await fetch(API + path, {
+    headers: { 'Content-Type': 'application/json' },
+    ...opts,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || 'Request failed');
+  }
+  return res.json();
+}
+
+// --- Dashboard ---
+async function refreshDashboard() {
+  try {
+    await api('/health');
+    document.getElementById('dash-api').textContent = 'OK';
+    document.getElementById('dash-api').className = 'card-value ok';
+  } catch {
+    document.getElementById('dash-api').textContent = 'Down';
+    document.getElementById('dash-api').className = 'card-value err';
+  }
+
+  try {
+    const recipes = await api('/api/recipes');
+    document.getElementById('dash-recipes').textContent = recipes.length;
+  } catch { /* ignore */ }
+
+  try {
+    const tasks = await api('/api/crawl');
+    const running = tasks.filter(t => t.status === 'running').length;
+    const completed = tasks.filter(t => t.status === 'completed').length;
+    const failed = tasks.filter(t => t.status === 'failed').length;
+    document.getElementById('dash-running').textContent = running;
+    document.getElementById('dash-completed').textContent = completed;
+    document.getElementById('dash-failed').textContent = failed;
+
+    const tbody = document.querySelector('#dash-tasks-table tbody');
+    tbody.innerHTML = tasks.slice(-10).reverse().map(t => `
+      <tr>
+        <td><code>${t.task_id}</code></td>
+        <td>${t.recipe_path}</td>
+        <td><span class="badge badge-${t.status}">${t.status}</span></td>
+        <td>${new Date(t.started_at).toLocaleString()}</td>
+        <td>${t.log_count}</td>
+      </tr>
+    `).join('');
+  } catch { /* ignore */ }
+}
+
+// --- Recipes ---
+async function loadRecipes() {
+  try {
+    const recipes = await api('/api/recipes');
+    const tbody = document.querySelector('#recipe-table tbody');
+    tbody.innerHTML = recipes.map(r => `
+      <tr>
+        <td><strong>${esc(r.name)}</strong><br><small style="color:var(--text2)">${esc(r.path)}</small></td>
+        <td><small>${esc((r.start_urls || [])[0] || '-')}</small></td>
+        <td>${r.pagination_type || 'None'}</td>
+        <td>
+          <button class="btn btn-sm btn-primary" onclick="runRecipe('${esc(r.path)}')">Run</button>
+          <button class="btn btn-sm btn-danger" onclick="deleteRecipe('${esc(r.path)}')">Delete</button>
+        </td>
+      </tr>
+    `).join('');
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function esc(s) {
+  const el = document.createElement('span');
+  el.textContent = s;
+  return el.innerHTML;
+}
+
+function toggleRecipeForm() {
+  document.getElementById('recipe-form').classList.toggle('hidden');
+}
+
+function updatePagFields() {
+  const type = document.getElementById('rf-pag-type').value;
+  document.getElementById('pag-next').classList.toggle('hidden', type !== 'next');
+  document.getElementById('pag-all-links').classList.toggle('hidden', type !== 'all_links');
+  document.getElementById('pag-url-template').classList.toggle('hidden', type !== 'url_template');
+}
+
+async function createRecipe() {
+  const name = document.getElementById('rf-name').value.trim();
+  if (!name) { toast('Name is required', 'error'); return; }
+
+  const urlsRaw = document.getElementById('rf-urls').value.trim();
+  const urls = urlsRaw.split('\n').map(u => u.trim()).filter(Boolean);
+  if (!urls.length) { toast('At least one URL is required', 'error'); return; }
+
+  const scope = document.getElementById('rf-scope').value.trim();
+  if (!scope) { toast('List Scope CSS is required', 'error'); return; }
+
+  const body = {
+    name,
+    start_urls: urls,
+    list_scope_css: scope,
+    item_link_css: document.getElementById('rf-item-link').value.trim() || 'a[href]',
+  };
+
+  const pagType = document.getElementById('rf-pag-type').value;
+  if (pagType) {
+    body.pagination_type = pagType;
+    if (pagType === 'next') body.next_css = document.getElementById('rf-next-css').value.trim();
+    if (pagType === 'all_links') body.pagination_scope_css = document.getElementById('rf-pag-scope').value.trim();
+    if (pagType === 'url_template') {
+      body.page_param = document.getElementById('rf-page-param').value.trim();
+      body.page_start = parseInt(document.getElementById('rf-page-start').value) || 1;
+      body.page_end = parseInt(document.getElementById('rf-page-end').value) || 10;
+    }
+  }
+
+  const maxPages = document.getElementById('rf-max-pages').value;
+  const maxItems = document.getElementById('rf-max-items').value;
+  if (maxPages) body.max_list_pages = parseInt(maxPages);
+  if (maxItems) body.max_items = parseInt(maxItems);
+
+  const outItems = document.getElementById('rf-out-items').value.trim();
+  const outPages = document.getElementById('rf-out-pages').value.trim();
+  if (outItems) body.items_jsonl = outItems;
+  if (outPages) body.pages_jsonl = outPages;
+
+  try {
+    await api('/api/recipes', { method: 'POST', body: JSON.stringify(body) });
+    toast('Recipe created');
+    toggleRecipeForm();
+    loadRecipes();
+    // Reset form
+    ['rf-name','rf-urls','rf-scope','rf-next-css','rf-pag-scope','rf-page-param','rf-out-items','rf-out-pages'].forEach(id => {
+      document.getElementById(id).value = '';
+    });
+    document.getElementById('rf-item-link').value = 'a[href]';
+    document.getElementById('rf-pag-type').value = '';
+    updatePagFields();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function deleteRecipe(path) {
+  if (!confirm(`Delete recipe ${path}?`)) return;
+  try {
+    await api(`/api/recipes/${path}`, { method: 'DELETE' });
+    toast('Recipe deleted');
+    loadRecipes();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function runRecipe(path) {
+  // Switch to crawl tab and start
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  document.querySelector('[data-tab="crawl"]').classList.add('active');
+  document.getElementById('tab-crawl').classList.add('active');
+
+  await loadCrawlRecipes();
+  document.getElementById('crawl-recipe').value = path;
+  startCrawl();
+}
+
+// --- Crawl ---
+async function loadCrawlRecipes() {
+  try {
+    const recipes = await api('/api/recipes');
+    const sel = document.getElementById('crawl-recipe');
+    const prev = sel.value;
+    sel.innerHTML = recipes.map(r =>
+      `<option value="${esc(r.path)}">${esc(r.name)} (${esc(r.path)})</option>`
+    ).join('');
+    if (prev) sel.value = prev;
+  } catch { /* ignore */ }
+}
+
+async function loadCrawlTasks() {
+  try {
+    const tasks = await api('/api/crawl');
+    const tbody = document.querySelector('#crawl-table tbody');
+    tbody.innerHTML = tasks.slice().reverse().map(t => `
+      <tr>
+        <td><code>${t.task_id}</code></td>
+        <td>${esc(t.recipe_path)}</td>
+        <td><span class="badge badge-${t.status}">${t.status}</span></td>
+        <td>${new Date(t.started_at).toLocaleString()}</td>
+        <td><button class="btn btn-sm" style="background:var(--surface2)" onclick="viewLog('${t.task_id}')">Log</button></td>
+      </tr>
+    `).join('');
+  } catch { /* ignore */ }
+}
+
+async function startCrawl() {
+  const path = document.getElementById('crawl-recipe').value;
+  if (!path) { toast('Select a recipe', 'error'); return; }
+  const headless = document.getElementById('crawl-headless').checked;
+
+  try {
+    const res = await api('/api/crawl', {
+      method: 'POST',
+      body: JSON.stringify({ recipe_path: path, headless }),
+    });
+    toast(`Crawl started: ${res.task_id}`);
+    loadCrawlTasks();
+    viewLog(res.task_id);
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+let logPollInterval = null;
+function viewLog(taskId) {
+  document.getElementById('log-section').classList.remove('hidden');
+  document.getElementById('log-task-id').textContent = taskId;
+  document.getElementById('log-output').textContent = 'Loading...';
+
+  if (logPollInterval) clearInterval(logPollInterval);
+
+  async function poll() {
+    try {
+      const data = await api(`/api/crawl/${taskId}?tail=200`);
+      const el = document.getElementById('log-output');
+      el.textContent = data.log_tail.join('\n') || '(no output yet)';
+      el.scrollTop = el.scrollHeight;
+
+      // Update task list too
+      loadCrawlTasks();
+
+      if (data.status !== 'running') {
+        clearInterval(logPollInterval);
+        logPollInterval = null;
+      }
+    } catch { /* ignore */ }
+  }
+
+  poll();
+  logPollInterval = setInterval(poll, 2000);
+}
+
+function closeLog() {
+  document.getElementById('log-section').classList.add('hidden');
+  if (logPollInterval) { clearInterval(logPollInterval); logPollInterval = null; }
+}
+
+// --- Browser View ---
+function reconnectVNC() {
+  const iframe = document.getElementById('vnc-iframe');
+  iframe.src = '';
+  setTimeout(() => {
+    iframe.src = `${VNC_BASE}/vnc.html?autoconnect=true&resize=scale&reconnect=true&reconnect_delay=1000`;
+  }, 200);
+}
+
+// --- Login ---
+let loginPollInterval = null;
+
+async function loginOpen() {
+  const url = document.getElementById('login-url').value.trim();
+  if (!url) { toast('Enter a URL', 'error'); return; }
+  const label = document.getElementById('login-label').value.trim();
+
+  document.getElementById('login-open-btn').disabled = true;
+  try {
+    const res = await api('/api/login/open', {
+      method: 'POST',
+      body: JSON.stringify({ url, label }),
+    });
+    toast(res.message);
+    refreshLoginStatus();
+    // Start polling status
+    if (loginPollInterval) clearInterval(loginPollInterval);
+    loginPollInterval = setInterval(refreshLoginStatus, 3000);
+  } catch (e) {
+    toast(e.message, 'error');
+  } finally {
+    document.getElementById('login-open-btn').disabled = false;
+  }
+}
+
+async function refreshLoginStatus() {
+  try {
+    const data = await api('/api/login/status');
+    const section = document.getElementById('login-active-section');
+    if (data.active) {
+      section.classList.remove('hidden');
+      document.getElementById('login-active-label').textContent = data.label;
+      document.getElementById('login-active-url').textContent = data.url;
+    } else {
+      section.classList.add('hidden');
+      if (loginPollInterval) { clearInterval(loginPollInterval); loginPollInterval = null; }
+    }
+  } catch { /* ignore */ }
+}
+
+async function loginSave() {
+  try {
+    const res = await api('/api/login/save', { method: 'POST' });
+    toast(res.message || `Session saved (${res.cookies_saved} cookies)`);
+    refreshLoginStatus();
+    loadSavedSessions();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function loginCancel() {
+  try {
+    await api('/api/login/cancel', { method: 'POST' });
+    toast('Login cancelled');
+    refreshLoginStatus();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function loadSavedSessions() {
+  try {
+    const data = await api('/api/login/sessions');
+    document.getElementById('login-cookie-count').textContent =
+      `${data.cookie_count} cookies stored across ${data.domains.length} domain(s)`;
+    document.getElementById('login-domains').innerHTML = data.domains.map(d =>
+      `<span class="badge badge-completed">${esc(d)}</span>`
+    ).join('');
+  } catch { /* ignore */ }
+}
+
+function switchToBrowser() {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  document.querySelector('[data-tab="browser"]').classList.add('active');
+  document.getElementById('tab-browser').classList.add('active');
+  if (!vncLoaded) {
+    document.getElementById('vnc-iframe').src =
+      `${VNC_BASE}/vnc.html?autoconnect=true&resize=scale&reconnect=true&reconnect_delay=1000`;
+    vncLoaded = true;
+  }
+}
+
+// --- Files ---
+let currentFilesPath = '';
+
+function buildBreadcrumb(path) {
+  const bc = document.getElementById('files-breadcrumb');
+  let html = '<a href="#" onclick="loadFiles(\'\'); return false;">output</a>';
+  if (path) {
+    const parts = path.split('/');
+    let accumulated = '';
+    for (const part of parts) {
+      accumulated += (accumulated ? '/' : '') + part;
+      const p = accumulated;
+      html += `<span>/</span><a href="#" onclick="loadFiles('${esc(p)}'); return false;">${esc(part)}</a>`;
+    }
+  }
+  bc.innerHTML = html;
+}
+
+async function loadFiles(path) {
+  currentFilesPath = path;
+  closePreview();
+  buildBreadcrumb(path);
+  try {
+    const url = path ? `/api/files?path=${encodeURIComponent(path)}` : '/api/files';
+    const data = await api(url);
+    const tbody = document.querySelector('#files-table tbody');
+    if (!data.entries || !data.entries.length) {
+      tbody.innerHTML = '<tr><td colspan="4" style="color:var(--text2);text-align:center;padding:32px;">No files</td></tr>';
+      return;
+    }
+    tbody.innerHTML = data.entries.map(f => {
+      if (f.is_dir) {
+        return `<tr>
+          <td><a href="#" onclick="loadFiles('${esc(f.path)}'); return false;" style="color:var(--accent);">${esc(f.name)}/</a></td>
+          <td style="color:var(--text2)">-</td>
+          <td style="color:var(--text2)">${new Date(f.modified).toLocaleString()}</td>
+          <td></td>
+        </tr>`;
+      }
+      return `<tr>
+        <td>${esc(f.name)}</td>
+        <td style="color:var(--text2)">${esc(f.size_fmt)}</td>
+        <td style="color:var(--text2)">${new Date(f.modified).toLocaleString()}</td>
+        <td>
+          <button class="btn btn-sm" style="background:var(--surface2)" onclick="previewFile('${esc(f.path)}')">View</button>
+          <a class="btn btn-sm btn-primary" href="${API}/api/files-download/${encodeURIComponent(f.path)}" download="${esc(f.name)}" style="text-decoration:none;">Download</a>
+        </td>
+      </tr>`;
+    }).join('');
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+async function previewFile(path) {
+  try {
+    const data = await api(`/api/files/${encodeURIComponent(path)}`);
+    document.getElementById('file-preview-section').classList.remove('hidden');
+    document.getElementById('preview-filename').textContent = data.name;
+    const dlBtn = document.getElementById('preview-download-btn');
+    dlBtn.onclick = () => { window.open(`${API}/api/files-download/${encodeURIComponent(path)}`, '_blank'); };
+    const el = document.getElementById('file-preview-content');
+    if (data.content != null) {
+      el.textContent = data.content;
+    } else {
+      el.textContent = `(Binary file or too large to preview — ${data.size_fmt})\nUse Download button.`;
+    }
+    el.scrollTop = 0;
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function closePreview() {
+  document.getElementById('file-preview-section').classList.add('hidden');
+}
+
+// --- Init ---
+refreshDashboard();
+</script>
+</body>
+</html>

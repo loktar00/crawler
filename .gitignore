@@ -91,3 +91,6 @@ debug_screenshot.png
 
 # Browser session data
 **/browser_session/
+
+# Workflow run data (user-generated)
+workflows/

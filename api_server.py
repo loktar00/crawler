@@ -1,0 +1,867 @@
+"""
+Claude Code API Server
+
+FastAPI server that accepts task prompts via HTTP POST, executes `claude -p`,
+and returns results. Designed so other LLMs, n8n, or any HTTP client can
+communicate with Claude Code.
+
+Usage:
+    python -m uvicorn api_server:app --host 0.0.0.0 --port 8080
+    # or via systemd: systemctl start claude-api
+"""
+
+import asyncio
+import json
+import os
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+import mimetypes
+
+import yaml
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
+
+app = FastAPI(
+    title="Claude Code API",
+    description="HTTP API for sending tasks to Claude Code",
+    version="1.0.0",
+)
+
+# --- Configuration ---
+
+CLAUDE_BIN = os.environ.get("CLAUDE_BIN", "claude")
+WORKING_DIR = os.environ.get("CLAUDE_WORKING_DIR", "/opt/crawler")
+DATA_DIR = os.environ.get("CLAUDE_DATA_DIR", "/opt/crawler/output")
+DEFAULT_ALLOWED_TOOLS = os.environ.get(
+    "CLAUDE_DEFAULT_TOOLS",
+    "Bash,Read,Write,Edit,Glob,Grep,mcp__playwright__browser_navigate,"
+    "mcp__playwright__browser_screenshot,mcp__playwright__browser_click,"
+    "mcp__playwright__browser_type,mcp__playwright__browser_snapshot",
+)
+MAX_TIMEOUT = 600  # 10 minutes
+RECIPES_DIR = Path("/opt/crawler/recipes")
+VENV_PYTHON = "/opt/crawler/venv/bin/python"
+
+# --- In-memory storage ---
+
+sessions: dict[str, dict] = {}
+crawl_tasks: dict[str, dict] = {}
+
+
+# --- Request/Response models ---
+
+
+class TaskRequest(BaseModel):
+    prompt: str
+    allowed_tools: Optional[list[str]] = None
+    timeout: int = Field(default=120, le=MAX_TIMEOUT)
+    system_prompt: Optional[str] = None
+
+
+class TaskResponse(BaseModel):
+    status: str
+    result: str
+    session_id: str
+    duration_seconds: float
+
+
+class ContinueRequest(BaseModel):
+    session_id: str
+    prompt: str
+    timeout: int = Field(default=120, le=MAX_TIMEOUT)
+
+
+class AuthPrepareRequest(BaseModel):
+    url: str
+    message: str = "Please log in via VNC"
+
+
+class AuthPrepareResponse(BaseModel):
+    status: str
+    vnc_display: str
+    message: str
+    pid: Optional[int] = None
+
+
+class SessionInfo(BaseModel):
+    session_id: str
+    created_at: str
+    last_prompt: str
+    turns: int
+
+
+class RecipeCreate(BaseModel):
+    name: str
+    start_urls: list[str]
+    list_scope_css: str
+    item_link_css: str = "a[href]"
+    pagination_type: Optional[str] = None  # next, all_links, url_template
+    next_css: Optional[str] = None
+    pagination_scope_css: Optional[str] = None
+    page_param: Optional[str] = None
+    page_start: Optional[int] = None
+    page_end: Optional[int] = None
+    max_list_pages: Optional[int] = None
+    max_items: Optional[int] = None
+    items_jsonl: Optional[str] = None
+    pages_jsonl: Optional[str] = None
+
+
+class CrawlRequest(BaseModel):
+    recipe_path: str
+    headless: bool = True
+
+
+# --- Helpers ---
+
+
+async def run_claude(
+    prompt: str,
+    timeout: int = 120,
+    allowed_tools: Optional[list[str]] = None,
+    session_id: Optional[str] = None,
+    resume: bool = False,
+    system_prompt: Optional[str] = None,
+) -> tuple[str, str]:
+    """
+    Run claude CLI and return (output_text, session_id).
+    """
+    tools = allowed_tools or DEFAULT_ALLOWED_TOOLS.split(",")
+
+    cmd = [CLAUDE_BIN, "-p", prompt, "--output-format", "json"]
+
+    for tool in tools:
+        cmd.extend(["--allowedTools", tool.strip()])
+
+    if resume and session_id:
+        cmd.extend(["--resume", session_id])
+    elif session_id:
+        cmd.extend(["--continue", session_id])
+
+    if system_prompt:
+        cmd.extend(["--append-system-prompt", system_prompt])
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=WORKING_DIR,
+        env={**os.environ, "DISPLAY": ":99"},
+    )
+
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=timeout
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.communicate()
+        raise HTTPException(status_code=504, detail="Claude task timed out")
+
+    output = stdout.decode("utf-8", errors="replace").strip()
+
+    # Parse JSON output to extract result and session_id
+    try:
+        data = json.loads(output)
+        result_text = data.get("result", output)
+        new_session_id = data.get("session_id", session_id or str(uuid.uuid4()))
+    except (json.JSONDecodeError, TypeError):
+        result_text = output
+        new_session_id = session_id or str(uuid.uuid4())
+
+    if proc.returncode != 0 and not result_text:
+        err = stderr.decode("utf-8", errors="replace").strip()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Claude exited with code {proc.returncode}: {err}",
+        )
+
+    return result_text, new_session_id
+
+
+# --- Endpoints ---
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
+
+
+@app.post("/task", response_model=TaskResponse)
+async def run_task(req: TaskRequest):
+    """Send a task prompt to Claude and get the response."""
+    start = asyncio.get_event_loop().time()
+    result, session_id = await run_claude(
+        prompt=req.prompt,
+        timeout=req.timeout,
+        allowed_tools=req.allowed_tools,
+        system_prompt=req.system_prompt,
+    )
+    duration = asyncio.get_event_loop().time() - start
+
+    sessions[session_id] = {
+        "session_id": session_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "last_prompt": req.prompt,
+        "turns": 1,
+    }
+
+    return TaskResponse(
+        status="ok",
+        result=result,
+        session_id=session_id,
+        duration_seconds=round(duration, 2),
+    )
+
+
+@app.post("/task/stream")
+async def run_task_stream(req: TaskRequest):
+    """Send a task prompt to Claude and stream the response as SSE."""
+
+    async def event_generator():
+        tools = req.allowed_tools or DEFAULT_ALLOWED_TOOLS.split(",")
+        cmd = [CLAUDE_BIN, "-p", req.prompt, "--output-format", "stream-json"]
+        for tool in tools:
+            cmd.extend(["--allowedTools", tool.strip()])
+        if req.system_prompt:
+            cmd.extend(["--append-system-prompt", req.system_prompt])
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=WORKING_DIR,
+            env={**os.environ, "DISPLAY": ":99"},
+        )
+
+        try:
+            async for line in proc.stdout:
+                text = line.decode("utf-8", errors="replace").strip()
+                if text:
+                    yield f"data: {text}\n\n"
+        except asyncio.CancelledError:
+            proc.kill()
+            raise
+        finally:
+            await proc.wait()
+
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/task/continue", response_model=TaskResponse)
+async def continue_task(req: ContinueRequest):
+    """Continue a previous conversation by session_id."""
+    if req.session_id not in sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    start = asyncio.get_event_loop().time()
+    result, session_id = await run_claude(
+        prompt=req.prompt,
+        timeout=req.timeout,
+        session_id=req.session_id,
+    )
+    duration = asyncio.get_event_loop().time() - start
+
+    sessions[session_id]["last_prompt"] = req.prompt
+    sessions[session_id]["turns"] += 1
+
+    return TaskResponse(
+        status="ok",
+        result=result,
+        session_id=session_id,
+        duration_seconds=round(duration, 2),
+    )
+
+
+@app.get("/sessions")
+async def list_sessions() -> list[SessionInfo]:
+    """List recent sessions."""
+    return [SessionInfo(**s) for s in sessions.values()]
+
+
+@app.post("/auth-prepare", response_model=AuthPrepareResponse)
+async def auth_prepare(req: AuthPrepareRequest):
+    """
+    Open a URL in a visible browser on the Xvfb display for VNC-based login.
+    The browser stays open until the user finishes authenticating.
+    """
+    script = f"""
+import sys
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=False)
+    ctx = browser.new_context(
+        viewport={{"width": 1280, "height": 900}},
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    )
+    page = ctx.new_page()
+    page.add_init_script("Object.defineProperty(navigator, 'webdriver', {{get: () => undefined}});")
+    page.goto("{req.url}", wait_until="domcontentloaded", timeout=60000)
+    print("AUTH_READY", flush=True)
+    # Keep browser open - user interacts via VNC
+    # Process will be killed when auth is done
+    import time
+    while True:
+        time.sleep(60)
+"""
+
+    proc = await asyncio.create_subprocess_exec(
+        "/opt/crawler/venv/bin/python", "-c", script,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=WORKING_DIR,
+        env={**os.environ, "DISPLAY": ":99"},
+    )
+
+    # Wait for the page to load (up to 30s)
+    try:
+        while True:
+            line = await asyncio.wait_for(proc.stdout.readline(), timeout=30)
+            if b"AUTH_READY" in line:
+                break
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise HTTPException(status_code=500, detail="Browser failed to open page")
+
+    return AuthPrepareResponse(
+        status="ready",
+        vnc_display=":99",
+        message=f"Page opened at {req.url}. Connect via VNC to authenticate.",
+        pid=proc.pid,
+    )
+
+
+# --- Login Session Management ---
+
+COOKIES_FILE = Path(DATA_DIR) / "browser_session" / "cookies.json"
+
+# Track active login browser processes
+login_sessions: dict[str, dict] = {}
+
+
+class LoginOpenRequest(BaseModel):
+    url: str
+    label: str = ""  # optional friendly name like "eBay", "Facebook"
+
+
+@app.post("/api/login/open")
+async def login_open(req: LoginOpenRequest):
+    """Open a non-headless browser for manual login. View via Browser tab."""
+    # Kill any existing login session
+    for sid, sess in list(login_sessions.items()):
+        proc = sess.get("proc")
+        if proc and proc.returncode is None:
+            try:
+                proc.kill()
+                await proc.wait()
+            except Exception:
+                pass
+        login_sessions.pop(sid, None)
+
+    session_id = str(uuid.uuid4())[:8]
+
+    # Script that opens browser, loads existing cookies, navigates to URL,
+    # waits for SAVE signal on stdin, then saves cookies and exits.
+    script = f'''
+import json, sys, signal, time, random
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+
+COOKIES_FILE = Path("{COOKIES_FILE}")
+
+with sync_playwright() as p:
+    browser = p.chromium.launch(
+        headless=False,
+        args=[
+            "--disable-blink-features=AutomationControlled",
+            "--disable-dev-shm-usage",
+            "--no-sandbox",
+        ],
+    )
+    vw = 1280 + random.randint(-50, 50)
+    vh = 900 + random.randint(-50, 50)
+    ctx = browser.new_context(
+        viewport={{"width": vw, "height": vh}},
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        locale="en-US",
+        timezone_id="America/New_York",
+    )
+
+    # Load existing cookies
+    if COOKIES_FILE.exists():
+        try:
+            cookies = json.loads(COOKIES_FILE.read_text())
+            ctx.add_cookies(cookies)
+        except Exception:
+            pass
+
+    page = ctx.new_page()
+    page.add_init_script("Object.defineProperty(navigator, \\'webdriver\\', {{get: () => undefined}});")
+    page.goto("{req.url}", wait_until="domcontentloaded", timeout=60000)
+    print("AUTH_READY", flush=True)
+
+    # Wait for SAVE command on stdin, or SIGTERM
+    running = True
+    def handle_sig(s, f):
+        global running
+        running = False
+    signal.signal(signal.SIGTERM, handle_sig)
+
+    while running:
+        try:
+            line = sys.stdin.readline().strip()
+            if line == "SAVE":
+                # Save all cookies
+                COOKIES_FILE.parent.mkdir(parents=True, exist_ok=True)
+                cookies = ctx.cookies()
+                COOKIES_FILE.write_text(json.dumps(cookies, indent=2))
+                count = len(cookies)
+                print(f"SAVED {{count}}", flush=True)
+                break
+            elif line == "QUIT":
+                break
+        except Exception:
+            time.sleep(1)
+
+    browser.close()
+    print("CLOSED", flush=True)
+'''
+
+    proc = await asyncio.create_subprocess_exec(
+        VENV_PYTHON, "-c", script,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=WORKING_DIR,
+        env={**os.environ, "DISPLAY": ":99"},
+    )
+
+    # Wait for the page to load
+    try:
+        while True:
+            line = await asyncio.wait_for(proc.stdout.readline(), timeout=30)
+            if b"AUTH_READY" in line:
+                break
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise HTTPException(status_code=500, detail="Browser failed to open")
+
+    login_sessions[session_id] = {
+        "session_id": session_id,
+        "url": req.url,
+        "label": req.label or req.url,
+        "proc": proc,
+        "status": "open",
+        "opened_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    return {
+        "session_id": session_id,
+        "status": "open",
+        "message": f"Browser opened at {req.url}. Log in via the Browser View tab, then click Save Session.",
+    }
+
+
+@app.post("/api/login/save")
+async def login_save():
+    """Save cookies from the active login browser and close it."""
+    active = [s for s in login_sessions.values() if s["status"] == "open"]
+    if not active:
+        raise HTTPException(status_code=404, detail="No active login session")
+
+    sess = active[0]
+    proc = sess["proc"]
+
+    if proc.returncode is not None:
+        sess["status"] = "closed"
+        raise HTTPException(status_code=400, detail="Browser already closed")
+
+    # Send SAVE command
+    try:
+        proc.stdin.write(b"SAVE\n")
+        await proc.stdin.drain()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to send save signal: {e}")
+
+    # Wait for confirmation
+    try:
+        while True:
+            line = await asyncio.wait_for(proc.stdout.readline(), timeout=15)
+            decoded = line.decode("utf-8", errors="replace").strip()
+            if decoded.startswith("SAVED"):
+                count = decoded.split()[-1] if " " in decoded else "?"
+                sess["status"] = "saved"
+                await proc.wait()
+                return {
+                    "status": "saved",
+                    "cookies_saved": count,
+                    "cookies_file": str(COOKIES_FILE),
+                    "message": f"Session saved ({count} cookies). Future headless crawls will use these cookies.",
+                }
+            if decoded == "CLOSED":
+                break
+    except asyncio.TimeoutError:
+        pass
+
+    proc.kill()
+    await proc.wait()
+    sess["status"] = "saved"
+    return {"status": "saved", "cookies_file": str(COOKIES_FILE)}
+
+
+@app.post("/api/login/cancel")
+async def login_cancel():
+    """Close the login browser without saving."""
+    active = [s for s in login_sessions.values() if s["status"] == "open"]
+    if not active:
+        raise HTTPException(status_code=404, detail="No active login session")
+
+    sess = active[0]
+    proc = sess["proc"]
+
+    if proc.returncode is None:
+        try:
+            proc.stdin.write(b"QUIT\n")
+            await proc.stdin.drain()
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except Exception:
+            proc.kill()
+            await proc.wait()
+
+    sess["status"] = "cancelled"
+    return {"status": "cancelled"}
+
+
+@app.get("/api/login/status")
+async def login_status():
+    """Get current login session status."""
+    active = [s for s in login_sessions.values() if s["status"] == "open"]
+    if not active:
+        return {"active": False}
+    sess = active[0]
+    # Check if process is still alive
+    if sess["proc"].returncode is not None:
+        sess["status"] = "closed"
+        return {"active": False}
+    return {
+        "active": True,
+        "session_id": sess["session_id"],
+        "url": sess["url"],
+        "label": sess["label"],
+        "opened_at": sess["opened_at"],
+    }
+
+
+@app.get("/api/login/sessions")
+async def list_saved_sessions():
+    """List domains with saved cookies."""
+    if not COOKIES_FILE.exists():
+        return {"domains": [], "cookie_count": 0}
+    try:
+        cookies = json.loads(COOKIES_FILE.read_text())
+        domains = sorted(set(c.get("domain", "").lstrip(".") for c in cookies if c.get("domain")))
+        return {"domains": domains, "cookie_count": len(cookies)}
+    except Exception:
+        return {"domains": [], "cookie_count": 0}
+
+
+# --- Recipe CRUD ---
+
+
+@app.get("/api/recipes")
+async def list_recipes():
+    """List all recipes."""
+    recipes = []
+    for path in sorted(RECIPES_DIR.rglob("*.yaml")):
+        try:
+            with open(path, "r") as f:
+                data = yaml.safe_load(f)
+            rel = str(path.relative_to(RECIPES_DIR))
+            recipes.append({
+                "name": path.stem,
+                "path": rel,
+                "start_urls": data.get("start_urls", []),
+                "pagination_type": (data.get("pagination") or {}).get("type"),
+            })
+        except Exception:
+            continue
+    return recipes
+
+
+@app.get("/api/recipes/{path:path}")
+async def get_recipe(path: str):
+    """Get full recipe content."""
+    file_path = RECIPES_DIR / path
+    if not file_path.resolve().is_relative_to(RECIPES_DIR.resolve()):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    with open(file_path, "r") as f:
+        data = yaml.safe_load(f)
+    return {"path": path, "content": data}
+
+
+@app.post("/api/recipes")
+async def create_recipe(req: RecipeCreate):
+    """Create a new recipe from form fields."""
+    # Build nested YAML dict from flat fields
+    data: dict = {
+        "start_urls": req.start_urls,
+        "list_scope_css": req.list_scope_css,
+        "item_link_css": req.item_link_css,
+    }
+
+    if req.pagination_type:
+        pag: dict = {"type": req.pagination_type}
+        if req.pagination_type == "next" and req.next_css:
+            pag["next_css"] = req.next_css
+        elif req.pagination_type == "all_links" and req.pagination_scope_css:
+            pag["pagination_scope_css"] = req.pagination_scope_css
+        elif req.pagination_type == "url_template":
+            if req.page_param:
+                pag["page_param"] = req.page_param
+            if req.page_start is not None:
+                pag["page_start"] = req.page_start
+            if req.page_end is not None:
+                pag["page_end"] = req.page_end
+        data["pagination"] = pag
+
+    if req.max_list_pages or req.max_items:
+        limits: dict = {}
+        if req.max_list_pages:
+            limits["max_list_pages"] = req.max_list_pages
+        if req.max_items:
+            limits["max_items"] = req.max_items
+        data["limits"] = limits
+
+    items_default = f"output/{req.name}_items.jsonl"
+    pages_default = f"output/{req.name}_pages.jsonl"
+    data["output"] = {
+        "items_jsonl": req.items_jsonl or items_default,
+        "pages_jsonl": req.pages_jsonl or pages_default,
+    }
+
+    # Validate using recipe_loader
+    from recipe_loader import Recipe
+    try:
+        Recipe.from_dict(data)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    # Save file
+    safe_name = req.name.replace("/", "_").replace("..", "_")
+    file_path = RECIPES_DIR / f"{safe_name}.yaml"
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(file_path, "w") as f:
+        yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+
+    return {"status": "created", "path": str(file_path.relative_to(RECIPES_DIR))}
+
+
+@app.delete("/api/recipes/{path:path}")
+async def delete_recipe(path: str):
+    """Delete a recipe."""
+    file_path = RECIPES_DIR / path
+    if not file_path.resolve().is_relative_to(RECIPES_DIR.resolve()):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Recipe not found")
+    file_path.unlink()
+    return {"status": "deleted", "path": path}
+
+
+# --- Crawl Task Management ---
+
+
+async def _run_crawl(task_id: str, recipe_path: str, headless: bool):
+    """Background coroutine: runs crawler.py and captures output."""
+    cmd = [
+        VENV_PYTHON, "crawler.py",
+        "--mode", "list",
+        "--recipe", recipe_path,
+    ]
+    if headless:
+        cmd.append("--headless")
+
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        cwd=WORKING_DIR,
+        env={**os.environ, "DISPLAY": ":99"},
+    )
+
+    crawl_tasks[task_id]["pid"] = proc.pid
+    lines = crawl_tasks[task_id]["log_lines"]
+
+    async for line in proc.stdout:
+        text = line.decode("utf-8", errors="replace").rstrip()
+        lines.append(text)
+
+    await proc.wait()
+    crawl_tasks[task_id]["returncode"] = proc.returncode
+    crawl_tasks[task_id]["status"] = "completed" if proc.returncode == 0 else "failed"
+    crawl_tasks[task_id]["finished_at"] = datetime.now(timezone.utc).isoformat()
+
+
+@app.post("/api/crawl")
+async def start_crawl(req: CrawlRequest):
+    """Start a crawl as a background task."""
+    recipe_file = RECIPES_DIR / req.recipe_path
+    if not recipe_file.resolve().is_relative_to(RECIPES_DIR.resolve()):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if not recipe_file.exists():
+        raise HTTPException(status_code=404, detail="Recipe not found")
+
+    task_id = str(uuid.uuid4())[:8]
+    crawl_tasks[task_id] = {
+        "task_id": task_id,
+        "recipe_path": req.recipe_path,
+        "headless": req.headless,
+        "status": "running",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "finished_at": None,
+        "pid": None,
+        "returncode": None,
+        "log_lines": [],
+    }
+
+    asyncio.create_task(_run_crawl(task_id, str(recipe_file), req.headless))
+    return {"task_id": task_id, "status": "running"}
+
+
+@app.get("/api/crawl")
+async def list_crawl_tasks():
+    """List all crawl tasks."""
+    return [
+        {k: v for k, v in t.items() if k != "log_lines"}
+        | {"log_count": len(t["log_lines"])}
+        for t in crawl_tasks.values()
+    ]
+
+
+@app.get("/api/crawl/{task_id}")
+async def get_crawl_task(task_id: str, tail: int = 50):
+    """Get crawl task status and log tail."""
+    if task_id not in crawl_tasks:
+        raise HTTPException(status_code=404, detail="Task not found")
+    t = crawl_tasks[task_id]
+    return {
+        "task_id": t["task_id"],
+        "recipe_path": t["recipe_path"],
+        "status": t["status"],
+        "started_at": t["started_at"],
+        "finished_at": t["finished_at"],
+        "returncode": t["returncode"],
+        "log_count": len(t["log_lines"]),
+        "log_tail": t["log_lines"][-tail:],
+    }
+
+
+# --- Output Files ---
+
+OUTPUT_DIR = Path(DATA_DIR)
+
+
+def _fmt_size(size: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024:
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def _file_info(path: Path) -> dict:
+    stat = path.stat()
+    return {
+        "name": path.name,
+        "path": str(path.relative_to(OUTPUT_DIR)),
+        "size": stat.st_size,
+        "size_fmt": _fmt_size(stat.st_size),
+        "modified": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+        "is_dir": path.is_dir(),
+    }
+
+
+@app.get("/api/files")
+async def list_output_files(path: str = ""):
+    """List files in the output directory."""
+    target = (OUTPUT_DIR / path).resolve()
+    if not str(target).startswith(str(OUTPUT_DIR.resolve())):
+        raise HTTPException(status_code=403, detail="Access denied")
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="Not found")
+    if target.is_file():
+        return _file_info(target)
+    entries = sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name))
+    return {
+        "path": path or "/",
+        "entries": [_file_info(e) for e in entries],
+    }
+
+
+@app.get("/api/files/{path:path}")
+async def get_output_file_info(path: str):
+    """Get file info, with text content for small text files."""
+    target = (OUTPUT_DIR / path).resolve()
+    if not str(target).startswith(str(OUTPUT_DIR.resolve())):
+        raise HTTPException(status_code=403, detail="Access denied")
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="Not found")
+    if target.is_dir():
+        return await list_output_files(path)
+    info = _file_info(target)
+    text_exts = {".json", ".jsonl", ".txt", ".csv", ".yaml", ".yml", ".html", ".md", ".log"}
+    if target.suffix.lower() in text_exts and info["size"] < 5_000_000:
+        try:
+            info["content"] = target.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            info["content"] = None
+    return info
+
+
+@app.get("/api/files-download/{path:path}")
+async def download_output_file(path: str):
+    """Download a file from the output directory."""
+    target = (OUTPUT_DIR / path).resolve()
+    if not str(target).startswith(str(OUTPUT_DIR.resolve())):
+        raise HTTPException(status_code=403, detail="Access denied")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    media_type, _ = mimetypes.guess_type(str(target))
+    return FileResponse(target, media_type=media_type or "application/octet-stream", filename=target.name)
+
+
+# --- Dashboard redirect ---
+
+
+@app.get("/dashboard")
+async def dashboard_redirect():
+    return RedirectResponse(url="/dashboard/")
+
+
+# --- Static files mount (must be last) ---
+
+static_dir = Path("/opt/crawler/static")
+static_dir.mkdir(exist_ok=True)
+app.mount("/dashboard", StaticFiles(directory=str(static_dir), html=True), name="dashboard")
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    port = int(os.environ.get("CLAUDE_API_PORT", "8080"))
+    uvicorn.run(app, host="0.0.0.0", port=port)
