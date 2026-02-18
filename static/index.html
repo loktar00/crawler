@@ -209,6 +209,85 @@
     word-break: break-all;
     color: var(--text2);
   }
+
+  /* Agent output */
+  .agent-output {
+    background: #0a0c10;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px;
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 13px;
+    line-height: 1.6;
+    max-height: 600px;
+    overflow-y: auto;
+  }
+  .agent-text {
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-word;
+    margin-bottom: 8px;
+  }
+  .agent-tool {
+    border-left: 3px solid var(--accent);
+    padding: 6px 10px;
+    margin: 6px 0;
+    background: rgba(108,138,255,.06);
+    border-radius: 0 var(--radius) var(--radius) 0;
+    font-size: 12px;
+  }
+  .agent-tool .tool-name { color: var(--accent); font-weight: 600; }
+  .agent-tool .tool-params {
+    color: var(--text2);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+    cursor: pointer;
+    display: block;
+    margin-top: 2px;
+  }
+  .agent-tool .tool-params.expanded {
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-width: none;
+  }
+  .agent-tool-result {
+    border-left: 3px solid var(--green);
+    padding: 6px 10px;
+    margin: 6px 0;
+    background: rgba(74,222,128,.06);
+    border-radius: 0 var(--radius) var(--radius) 0;
+    font-size: 12px;
+    color: var(--text2);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .agent-result-final {
+    border: 1px solid var(--green);
+    background: rgba(74,222,128,.08);
+    border-radius: var(--radius);
+    padding: 12px;
+    margin-top: 12px;
+    color: var(--text);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .agent-error {
+    border-left: 3px solid var(--red);
+    padding: 6px 10px;
+    margin: 6px 0;
+    background: rgba(248,113,113,.06);
+    border-radius: 0 var(--radius) var(--radius) 0;
+    font-size: 12px;
+    color: var(--red);
+    white-space: pre-wrap;
+  }
+  .agent-elapsed {
+    color: var(--text2);
+    font-size: 12px;
+    margin-top: 8px;
+  }
 </style>
 </head>
 <body>
@@ -221,6 +300,7 @@
   <button class="tab-btn" data-tab="workflows">Workflows</button>
   <button class="tab-btn" data-tab="login">Login</button>
   <button class="tab-btn" data-tab="files">Files</button>
+  <button class="tab-btn" data-tab="agent">Agent</button>
   <button class="tab-btn" data-tab="browser">Browser View</button>
 </div>
 
@@ -584,6 +664,63 @@
         </div>
       </div>
       <div class="file-preview" id="file-preview-content"></div>
+    </div>
+  </div>
+
+  <!-- TAB: Agent -->
+  <div class="tab-content" id="tab-agent">
+    <h2 style="font-size:16px; margin-bottom:16px;">Browser Agent</h2>
+    <p style="color:var(--text2); font-size:14px; margin-bottom:20px;">
+      Give Claude a natural language command. It will use the live browser to explore pages and complete actions.
+    </p>
+
+    <div class="form-section">
+      <div class="form-group">
+        <label>URL (optional — agent will navigate here first)</label>
+        <input type="text" id="agent-url" placeholder="https://example.com">
+      </div>
+      <div class="form-group">
+        <label>Prompt</label>
+        <textarea id="agent-prompt" rows="3" placeholder="Find the page title and list all links..."></textarea>
+      </div>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <button class="btn btn-primary" id="agent-run-btn" onclick="agentRun()">Run</button>
+        <button class="btn btn-danger" id="agent-stop-btn" onclick="agentStop()" disabled>Stop</button>
+        <button class="btn" style="background:var(--surface2)" onclick="agentClear()">Clear</button>
+        <span class="agent-elapsed" id="agent-elapsed"></span>
+      </div>
+    </div>
+    <div id="agent-output-section" style="margin-top:20px;">
+      <div class="agent-output" id="agent-output"></div>
+    </div>
+
+    <!-- Save as Workflow (shown after successful run) -->
+    <div id="agent-save-section" class="hidden" style="margin-top:16px;">
+      <div class="form-section" style="border-color:var(--green);">
+        <h3 style="font-size:14px; margin-bottom:12px;">Save as Workflow</h3>
+        <p style="color:var(--text2); font-size:12px; margin-bottom:12px;">
+          Save this run as a replayable workflow. Future runs will replay the exact steps without AI.
+        </p>
+        <div id="agent-save-steps-preview" style="margin-bottom:12px; font-size:12px; color:var(--text2);"></div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>Workflow Name</label>
+            <input type="text" id="agent-save-name" placeholder="e.g. ebay_recent_purchase">
+          </div>
+          <div class="form-group">
+            <label>Description (optional)</label>
+            <input type="text" id="agent-save-desc" placeholder="What this workflow does">
+          </div>
+        </div>
+        <div class="form-group">
+          <label>Tags (comma-separated, optional)</label>
+          <input type="text" id="agent-save-tags" placeholder="ebay, purchases">
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button class="btn btn-primary" onclick="agentSaveWorkflow()">Save Workflow</button>
+          <button class="btn" style="background:var(--surface2)" onclick="agentDismissSave()">Dismiss</button>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -1386,6 +1523,365 @@ async function previewFile(path) {
 function closePreview() {
   document.getElementById('file-preview-section').classList.add('hidden');
 }
+
+// --- Agent ---
+let agentAbort = null;
+let agentTimer = null;
+let agentStartTime = null;
+let agentCapturedEvents = [];
+let agentLastPrompt = '';
+
+const AGENT_TOOLS = [
+  "mcp__playwright__browser_navigate",
+  "mcp__playwright__browser_snapshot",
+  "mcp__playwright__browser_click",
+  "mcp__playwright__browser_type",
+  "mcp__playwright__browser_press_key",
+  "mcp__playwright__browser_take_screenshot",
+  "mcp__playwright__browser_evaluate",
+  "mcp__playwright__browser_select_option",
+  "mcp__playwright__browser_hover",
+  "mcp__playwright__browser_tabs",
+  "mcp__playwright__browser_wait_for",
+  "mcp__playwright__browser_fill_form",
+  "mcp__playwright__browser_navigate_back",
+  "mcp__playwright__browser_console_messages",
+  "mcp__playwright__browser_network_requests",
+  "mcp__playwright__browser_run_code",
+];
+
+const AGENT_SYSTEM_PROMPT = `You are a browser agent. You use Playwright tools to interact with web pages.
+Saved login sessions are automatically loaded — you are already authenticated on sites the user has logged into.
+Always start by taking a snapshot to understand the current page state.
+Explain what you find and what actions you take. Be thorough in your observations.
+When done, provide a clear summary of your findings or the result of the action.`;
+
+function agentShortToolName(name) {
+  return name.replace(/^mcp__playwright__browser_/, '');
+}
+
+async function agentRun() {
+  const url = document.getElementById('agent-url').value.trim();
+  let prompt = document.getElementById('agent-prompt').value.trim();
+  if (!prompt) { toast('Enter a prompt', 'error'); return; }
+
+  if (url) {
+    prompt = `Navigate to ${url}. Then: ${prompt}`;
+  }
+
+  agentLastPrompt = prompt;
+  agentCapturedEvents = [];
+  agentDismissSave();
+
+  const output = document.getElementById('agent-output');
+  output.innerHTML = '';
+
+  document.getElementById('agent-run-btn').disabled = true;
+  document.getElementById('agent-stop-btn').disabled = false;
+
+  agentAbort = new AbortController();
+  agentStartTime = Date.now();
+  agentUpdateElapsed();
+  agentTimer = setInterval(agentUpdateElapsed, 1000);
+
+  let ranOk = false;
+  try {
+    const res = await fetch(API + '/task/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt,
+        allowed_tools: AGENT_TOOLS,
+        system_prompt: AGENT_SYSTEM_PROMPT,
+        timeout: 300,
+      }),
+      signal: agentAbort.signal,
+    });
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let lastResult = null;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const payload = line.slice(6).trim();
+        if (payload === '[DONE]') continue;
+
+        try {
+          const data = JSON.parse(payload);
+          agentCapturedEvents.push(data);
+          lastResult = agentRenderEvent(data, output);
+        } catch {
+          // not JSON, skip
+        }
+        output.scrollTop = output.scrollHeight;
+      }
+    }
+
+    // Show final result if we have one
+    if (lastResult) {
+      const div = document.createElement('div');
+      div.className = 'agent-result-final';
+      div.textContent = lastResult;
+      output.appendChild(div);
+      output.scrollTop = output.scrollHeight;
+    }
+    ranOk = true;
+  } catch (e) {
+    const div = document.createElement('div');
+    div.className = 'agent-error';
+    if (e.name === 'AbortError') {
+      div.textContent = 'Stopped by user.';
+    } else if (e.message === 'network error' || e.message === 'Failed to fetch') {
+      div.textContent = 'Connection lost — the agent process may have finished or timed out. Check output above for results.';
+      ranOk = true;  // still offer save — the agent likely finished
+    } else {
+      div.textContent = `Error: ${e.message}`;
+    }
+    output.appendChild(div);
+  } finally {
+    agentFinish();
+    // Offer to save as workflow if we captured any actionable steps
+    if (ranOk) {
+      const steps = agentExtractSteps();
+      if (steps.length > 0) {
+        agentShowSave(steps);
+      }
+    }
+  }
+}
+
+function agentRenderEvent(data, output) {
+  let lastResult = null;
+
+  // stream-json format: each line is a JSON object with a "type" field
+  if (data.type === 'assistant' && data.message) {
+    const blocks = data.message.content || [];
+    for (const b of blocks) {
+      if (b.type === 'text' && b.text) {
+        const div = document.createElement('div');
+        div.className = 'agent-text';
+        div.textContent = b.text;
+        output.appendChild(div);
+      } else if (b.type === 'tool_use') {
+        agentAppendToolCall(output, b.name, b.input);
+      }
+    }
+  } else if (data.type === 'tool_result' || data.type === 'result') {
+    // Tool results
+    const content = data.content || data.result || '';
+    const text = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
+    if (data.type === 'result') {
+      lastResult = text;
+    } else {
+      const div = document.createElement('div');
+      div.className = 'agent-tool-result';
+      // Truncate long tool results
+      if (text.length > 500) {
+        const preview = text.substring(0, 500);
+        div.textContent = preview + '...';
+        div.style.cursor = 'pointer';
+        div.title = 'Click to expand';
+        div.addEventListener('click', function() {
+          if (this.dataset.expanded === '1') {
+            this.textContent = preview + '...';
+            this.dataset.expanded = '0';
+          } else {
+            this.textContent = text;
+            this.dataset.expanded = '1';
+          }
+        });
+      } else {
+        div.textContent = text;
+      }
+      output.appendChild(div);
+    }
+  } else if (data.type === 'error') {
+    const div = document.createElement('div');
+    div.className = 'agent-error';
+    div.textContent = data.error || JSON.stringify(data);
+    output.appendChild(div);
+  }
+
+  return lastResult;
+}
+
+function agentAppendToolCall(output, name, input) {
+  const div = document.createElement('div');
+  div.className = 'agent-tool';
+
+  const nameSpan = document.createElement('span');
+  nameSpan.className = 'tool-name';
+  nameSpan.textContent = agentShortToolName(name);
+  div.appendChild(nameSpan);
+
+  const paramsText = JSON.stringify(input, null, 2);
+  const paramsSpan = document.createElement('span');
+  paramsSpan.className = 'tool-params';
+  paramsSpan.textContent = JSON.stringify(input);
+  paramsSpan.title = 'Click to expand';
+  paramsSpan.addEventListener('click', function() {
+    if (this.classList.contains('expanded')) {
+      this.classList.remove('expanded');
+      this.textContent = JSON.stringify(input);
+    } else {
+      this.classList.add('expanded');
+      this.textContent = paramsText;
+    }
+  });
+  div.appendChild(paramsSpan);
+  output.appendChild(div);
+}
+
+function agentStop() {
+  if (agentAbort) {
+    agentAbort.abort();
+    agentAbort = null;
+  }
+}
+
+function agentClear() {
+  document.getElementById('agent-output').innerHTML = '';
+  document.getElementById('agent-elapsed').textContent = '';
+  agentCapturedEvents = [];
+  agentDismissSave();
+}
+
+function agentFinish() {
+  document.getElementById('agent-run-btn').disabled = false;
+  document.getElementById('agent-stop-btn').disabled = true;
+  agentAbort = null;
+  if (agentTimer) { clearInterval(agentTimer); agentTimer = null; }
+  agentUpdateElapsed();
+}
+
+// --- Agent → Workflow Save ---
+const AGENT_SKIP_ACTIONS = new Set([
+  'snapshot', 'take_screenshot', 'console_messages', 'network_requests', 'install'
+]);
+const AGENT_TOOL_PREFIX = 'mcp__playwright__browser_';
+
+function agentExtractSteps() {
+  const steps = [];
+  let seq = 0;
+  for (const ev of agentCapturedEvents) {
+    if (ev.type !== 'assistant' || !ev.message) continue;
+    const blocks = ev.message.content || [];
+    for (const b of blocks) {
+      if (b.type !== 'tool_use') continue;
+      const name = b.name || '';
+      if (!name.startsWith(AGENT_TOOL_PREFIX)) continue;
+      const action = name.slice(AGENT_TOOL_PREFIX.length);
+      if (AGENT_SKIP_ACTIONS.has(action)) continue;
+      seq++;
+      steps.push({
+        seq,
+        action,
+        params: b.input || {},
+        description: agentStepDescription(action, b.input || {}),
+      });
+    }
+  }
+  return steps;
+}
+
+function agentStepDescription(action, params) {
+  if (action === 'navigate') return `Navigate to ${params.url || '?'}`;
+  if (action === 'click') return `Click ${params.element || params.ref || '?'}`;
+  if (action === 'type') {
+    const t = params.text || '';
+    return `Type '${t.length > 40 ? t.slice(0, 40) + '...' : t}'`;
+  }
+  if (action === 'fill_form') return `Fill ${(params.fields || []).length} field(s)`;
+  if (action === 'select_option') return `Select option in ${params.element || '?'}`;
+  if (action === 'press_key') return `Press ${params.key || '?'}`;
+  if (action === 'hover') return `Hover over ${params.element || params.ref || '?'}`;
+  if (action === 'wait_for') {
+    if (params.text) return `Wait for text: ${params.text}`;
+    if (params.textGone) return `Wait for text gone: ${params.textGone}`;
+    if (params.time) return `Wait ${params.time}s`;
+    return 'Wait';
+  }
+  if (action === 'evaluate') return 'Run JavaScript';
+  if (action === 'navigate_back') return 'Go back';
+  if (action === 'run_code') return 'Run Playwright code';
+  return action;
+}
+
+function agentShowSave(steps) {
+  const section = document.getElementById('agent-save-section');
+  section.classList.remove('hidden');
+  const preview = document.getElementById('agent-save-steps-preview');
+  preview.innerHTML = `<strong>${steps.length} replayable step(s):</strong> ` +
+    steps.map(s => `<code>${esc(s.action)}</code>`).join(' → ');
+  // Auto-suggest a name from the prompt
+  const words = agentLastPrompt.replace(/^Navigate to https?:\/\/[^\s]+\.\s*Then:\s*/i, '')
+    .toLowerCase().replace(/[^a-z0-9 ]/g, '').trim().split(/\s+/).slice(0, 4).join('_');
+  document.getElementById('agent-save-name').value = words || '';
+  document.getElementById('agent-save-desc').value = '';
+  document.getElementById('agent-save-tags').value = '';
+}
+
+function agentDismissSave() {
+  document.getElementById('agent-save-section').classList.add('hidden');
+}
+
+async function agentSaveWorkflow() {
+  const name = document.getElementById('agent-save-name').value.trim();
+  if (!name) { toast('Enter a workflow name', 'error'); return; }
+
+  const steps = agentExtractSteps();
+  if (!steps.length) { toast('No replayable steps found', 'error'); return; }
+
+  const desc = document.getElementById('agent-save-desc').value.trim();
+  const tagsRaw = document.getElementById('agent-save-tags').value.trim();
+  const tags = tagsRaw ? tagsRaw.split(',').map(t => t.trim()).filter(Boolean) : [];
+
+  try {
+    await api('/api/workflows', {
+      method: 'POST',
+      body: JSON.stringify({
+        name,
+        description: desc,
+        recorded_from: agentLastPrompt,
+        input_schema: {},
+        steps,
+        tags,
+      }),
+    });
+    toast(`Workflow "${name}" saved with ${steps.length} steps`);
+    agentDismissSave();
+  } catch (e) {
+    toast(e.message, 'error');
+  }
+}
+
+function agentUpdateElapsed() {
+  if (!agentStartTime) return;
+  const secs = Math.floor((Date.now() - agentStartTime) / 1000);
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  document.getElementById('agent-elapsed').textContent = m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
+// Ctrl+Enter to submit agent prompt
+document.getElementById('agent-prompt').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    if (!document.getElementById('agent-run-btn').disabled) {
+      agentRun();
+    }
+  }
+});
 
 // --- Init ---
 refreshDashboard();

@@ -13,6 +13,7 @@ Usage:
 import asyncio
 import json
 import os
+import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -226,13 +227,16 @@ async def run_task(req: TaskRequest):
     )
 
 
+MCP_PROFILE_DIR = Path(DATA_DIR) / "browser_session" / "mcp_profile"
+
+
 @app.post("/task/stream")
 async def run_task_stream(req: TaskRequest):
     """Send a task prompt to Claude and stream the response as SSE."""
 
     async def event_generator():
         tools = req.allowed_tools or DEFAULT_ALLOWED_TOOLS.split(",")
-        cmd = [CLAUDE_BIN, "-p", req.prompt, "--output-format", "stream-json"]
+        cmd = [CLAUDE_BIN, "-p", req.prompt, "--output-format", "stream-json", "--verbose"]
         for tool in tools:
             cmd.extend(["--allowedTools", tool.strip()])
         if req.system_prompt:
@@ -244,6 +248,7 @@ async def run_task_stream(req: TaskRequest):
             stderr=asyncio.subprocess.PIPE,
             cwd=WORKING_DIR,
             env={**os.environ, "DISPLAY": ":99"},
+            limit=10 * 1024 * 1024,  # 10MB line buffer for large payloads (screenshots)
         )
 
         try:
@@ -255,7 +260,12 @@ async def run_task_stream(req: TaskRequest):
             proc.kill()
             raise
         finally:
+            stderr_bytes = await proc.stderr.read()
             await proc.wait()
+            if proc.returncode != 0 and stderr_bytes:
+                err_msg = stderr_bytes.decode("utf-8", errors="replace").strip()
+                import json as _json
+                yield f"data: {_json.dumps({'type': 'error', 'error': err_msg})}\n\n"
 
         yield "data: [DONE]\n\n"
 
@@ -379,7 +389,8 @@ async def login_open(req: LoginOpenRequest):
 
     session_id = str(uuid.uuid4())[:8]
 
-    # Script that opens browser, loads existing cookies, navigates to URL,
+    # Script that opens browser using MCP's persistent Chrome profile,
+    # loads existing cookies, navigates to URL,
     # waits for SAVE signal on stdin, then saves cookies and exits.
     script = f'''
 import json, sys, signal, time, random
@@ -387,26 +398,29 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 COOKIES_FILE = Path("{COOKIES_FILE}")
+MCP_PROFILE = Path("{MCP_PROFILE_DIR}")
+MCP_PROFILE.mkdir(parents=True, exist_ok=True)
 
 with sync_playwright() as p:
-    browser = p.chromium.launch(
+    vw = 1280 + random.randint(-50, 50)
+    vh = 900 + random.randint(-50, 50)
+
+    # Use persistent context with same profile as the Agent MCP browser
+    ctx = p.chromium.launch_persistent_context(
+        user_data_dir=str(MCP_PROFILE),
         headless=False,
         args=[
             "--disable-blink-features=AutomationControlled",
             "--disable-dev-shm-usage",
             "--no-sandbox",
         ],
-    )
-    vw = 1280 + random.randint(-50, 50)
-    vh = 900 + random.randint(-50, 50)
-    ctx = browser.new_context(
         viewport={{"width": vw, "height": vh}},
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         locale="en-US",
         timezone_id="America/New_York",
     )
 
-    # Load existing cookies
+    # Also load cookies from cookies.json for sites logged in before this change
     if COOKIES_FILE.exists():
         try:
             cookies = json.loads(COOKIES_FILE.read_text())
@@ -414,7 +428,7 @@ with sync_playwright() as p:
         except Exception:
             pass
 
-    page = ctx.new_page()
+    page = ctx.pages[0] if ctx.pages else ctx.new_page()
     page.add_init_script("Object.defineProperty(navigator, \\'webdriver\\', {{get: () => undefined}});")
     page.goto("{req.url}", wait_until="domcontentloaded", timeout=60000)
     print("AUTH_READY", flush=True)
@@ -430,11 +444,12 @@ with sync_playwright() as p:
         try:
             line = sys.stdin.readline().strip()
             if line == "SAVE":
-                # Save all cookies
+                # Save cookies to cookies.json (for headless crawler)
                 COOKIES_FILE.parent.mkdir(parents=True, exist_ok=True)
                 cookies = ctx.cookies()
                 COOKIES_FILE.write_text(json.dumps(cookies, indent=2))
                 count = len(cookies)
+                # Profile cookies are saved automatically by Chrome on close
                 print(f"SAVED {{count}}", flush=True)
                 break
             elif line == "QUIT":
@@ -442,7 +457,7 @@ with sync_playwright() as p:
         except Exception:
             time.sleep(1)
 
-    browser.close()
+    ctx.close()
     print("CLOSED", flush=True)
 '''
 
