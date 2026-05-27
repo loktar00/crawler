@@ -278,12 +278,21 @@ TOOLS = [
     },
     {
         "name": "browser_screenshot",
-        "description": "Take a screenshot of the current page. Returns base64-encoded PNG.",
+        "description": "Take a screenshot of the current page. Returns the image so you can see what's on screen.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "full_page": {"type": "boolean", "description": "Capture the full scrollable page (default: false)"},
             },
+            "required": [],
+        },
+    },
+    {
+        "name": "browser_screenshot_annotated",
+        "description": "Take a screenshot with numbered red labels overlaid on all clickable/interactive elements (links, buttons, inputs, etc.). Returns the annotated image plus a text legend mapping each number to its element tag, selector, text, and href. Use this to identify what to click on a page.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
             "required": [],
         },
     },
@@ -477,6 +486,9 @@ def handle_tool(name: str, args: dict, api_url: str, api_key: str) -> Any:
     elif name == "browser_screenshot":
         return call("/api/browser/screenshot", method="POST", body={"full_page": args.get("full_page", False)})
 
+    elif name == "browser_screenshot_annotated":
+        return call("/api/browser/screenshot/annotated", method="POST")
+
     elif name == "browser_get_links":
         return call("/api/browser/get_links", method="POST")
 
@@ -531,6 +543,39 @@ def _read_msg() -> dict | None:
     return json.loads(body)
 
 
+def _format_mcp_content(tool_name: str, result: Any) -> list[dict]:
+    """Format a tool result into MCP content blocks.
+
+    For screenshot tools, returns an image content block so agents can
+    actually see the screenshot. For annotated screenshots, also includes
+    a text legend mapping label numbers to element selectors.
+    """
+    if isinstance(result, dict) and "screenshot_base64" in result:
+        b64 = result.pop("screenshot_base64")
+        content = [
+            {"type": "image", "data": b64, "mimeType": "image/png"},
+        ]
+        # For annotated screenshots, include the click target legend
+        if "legend" in result:
+            legend = result.pop("legend")
+            content.append({
+                "type": "text",
+                "text": f"Page: {result.get('url', '')}\n"
+                        f"Interactive elements ({result.get('element_count', 0)}):\n{legend}",
+            })
+        else:
+            # Plain screenshot - include URL context
+            content.append({
+                "type": "text",
+                "text": f"Page: {result.get('url', '')}",
+            })
+        return content
+
+    # Default: return as text
+    text = json.dumps(result, indent=2) if not isinstance(result, str) else result
+    return [{"type": "text", "text": text}]
+
+
 def serve(api_url: str, api_key: str):
     """Run the MCP server on stdio."""
     while True:
@@ -569,13 +614,11 @@ def serve(api_url: str, api_key: str):
 
             try:
                 result = handle_tool(tool_name, tool_args, api_url, api_key)
-                text = json.dumps(result, indent=2) if not isinstance(result, str) else result
+                content = _format_mcp_content(tool_name, result)
                 _write_msg({
                     "jsonrpc": "2.0",
                     "id": msg_id,
-                    "result": {
-                        "content": [{"type": "text", "text": text}],
-                    },
+                    "result": {"content": content},
                 })
             except Exception as e:
                 _write_msg({

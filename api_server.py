@@ -894,6 +894,105 @@ with sync_playwright() as p:
                 b64 = base64.b64encode(raw).decode("ascii")
                 result = {{"url": page.url, "screenshot_base64": b64, "size": len(raw)}}
 
+            elif action == "screenshot_annotated":
+                # Find all interactive elements, overlay numbered labels, screenshot, then clean up
+                max_els = cmd.get("max_elements", 150)
+                elements = page.evaluate("""(maxEls) => {{
+                    const selectors = 'a[href], button, input, select, textarea, [role="button"], [role="link"], [role="tab"], [role="menuitem"], [onclick], [tabindex]:not([tabindex="-1"])';
+                    const els = Array.from(document.querySelectorAll(selectors));
+                    const results = [];
+                    const seen = new Set();
+                    for (const el of els) {{
+                        if (results.length >= maxEls) break;
+                        const rect = el.getBoundingClientRect();
+                        // Skip invisible or off-screen elements
+                        if (rect.width < 5 || rect.height < 5) continue;
+                        if (rect.bottom < 0 || rect.top > window.innerHeight) continue;
+                        if (rect.right < 0 || rect.left > window.innerWidth) continue;
+                        // Skip hidden elements
+                        const style = window.getComputedStyle(el);
+                        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') continue;
+                        // Deduplicate by position (rounded)
+                        const key = Math.round(rect.left) + ',' + Math.round(rect.top) + ',' + Math.round(rect.width) + ',' + Math.round(rect.height);
+                        if (seen.has(key)) continue;
+                        seen.add(key);
+                        // Build a useful selector
+                        let selector = '';
+                        if (el.id) selector = '#' + CSS.escape(el.id);
+                        else {{
+                            selector = el.tagName.toLowerCase();
+                            if (el.className && typeof el.className === 'string') {{
+                                const cls = el.className.trim().split(/\\s+/).slice(0, 2).map(c => '.' + CSS.escape(c)).join('');
+                                selector += cls;
+                            }}
+                        }}
+                        // Text content (truncated)
+                        let text = (el.innerText || el.value || el.placeholder || el.getAttribute('aria-label') || el.title || '').trim().substring(0, 80);
+                        results.push({{
+                            index: results.length + 1,
+                            tag: el.tagName.toLowerCase(),
+                            type: el.type || '',
+                            text: text,
+                            selector: selector,
+                            href: el.href || '',
+                            rect: {{ x: rect.x, y: rect.y, width: rect.width, height: rect.height }}
+                        }});
+                    }}
+                    return results;
+                }}""", max_els)
+
+                # Inject overlay labels onto the page
+                page.evaluate("""(elements) => {{
+                    const container = document.createElement('div');
+                    container.id = '__crawler_annotations__';
+                    container.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:2147483647;';
+                    for (const el of elements) {{
+                        // Draw border box
+                        const box = document.createElement('div');
+                        box.style.cssText = `position:fixed;left:${{el.rect.x}}px;top:${{el.rect.y}}px;width:${{el.rect.width}}px;height:${{el.rect.height}}px;border:2px solid rgba(255,0,0,0.7);background:rgba(255,0,0,0.05);pointer-events:none;box-sizing:border-box;`;
+                        // Draw number label
+                        const label = document.createElement('div');
+                        label.textContent = el.index;
+                        label.style.cssText = `position:fixed;left:${{el.rect.x}}px;top:${{Math.max(0, el.rect.y - 18)}}px;background:rgba(255,0,0,0.85);color:#fff;font:bold 12px/16px monospace;padding:1px 4px;border-radius:3px;pointer-events:none;white-space:nowrap;`;
+                        container.appendChild(box);
+                        container.appendChild(label);
+                    }}
+                    document.body.appendChild(container);
+                }}""", elements)
+
+                # Take the annotated screenshot
+                raw = page.screenshot(full_page=False)
+                b64 = base64.b64encode(raw).decode("ascii")
+
+                # Remove overlay
+                page.evaluate("document.getElementById('__crawler_annotations__')?.remove()")
+
+                # Build the text legend
+                legend_lines = []
+                for el in elements:
+                    tag = el.get("tag", "")
+                    text = el.get("text", "")
+                    href = el.get("href", "")
+                    sel = el.get("selector", "")
+                    etype = el.get("type", "")
+                    desc = f"[{{el['index']}}] <{{tag}}"
+                    if etype:
+                        desc += f" type={{etype}}"
+                    desc += f"> {{sel}}"
+                    if text:
+                        desc += f' "{{text[:60]}}"'
+                    if href:
+                        desc += f" -> {{href[:100]}}"
+                    legend_lines.append(desc)
+
+                result = {{
+                    "url": page.url,
+                    "screenshot_base64": b64,
+                    "size": len(raw),
+                    "element_count": len(elements),
+                    "legend": "\\n".join(legend_lines),
+                }}
+
             elif action == "get_links":
                 links = page.evaluate("""
                     () => Array.from(document.querySelectorAll('a[href]')).map(a => ({{
@@ -993,6 +1092,7 @@ async def browser_open():
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        limit=10 * 1024 * 1024,  # 10MB line buffer for large payloads (screenshots)
         cwd=WORKING_DIR,
         env=_display_env(),
     )
@@ -1067,7 +1167,7 @@ async def _browser_cmd(cmd: dict, _retried: bool = False) -> dict:
                 # Record action if recording is active
                 action = cmd.get("action", "")
                 if browser_recording["active"] and action not in (
-                    "snapshot", "screenshot", "get_links", "save_cookies"
+                    "snapshot", "screenshot", "screenshot_annotated", "get_links", "save_cookies"
                 ):
                     browser_recording["seq"] += 1
                     step = {
@@ -1178,6 +1278,13 @@ async def browser_screenshot(req: dict = None):
     """Take a screenshot. Returns base64-encoded PNG."""
     req = req or {}
     return await _browser_cmd({"action": "screenshot", "full_page": req.get("full_page", False)})
+
+
+@app.post("/api/browser/screenshot/annotated")
+async def browser_screenshot_annotated():
+    """Take a screenshot with numbered labels on all clickable elements.
+    Returns base64-encoded PNG plus a legend mapping numbers to selectors."""
+    return await _browser_cmd({"action": "screenshot_annotated"})
 
 
 @app.post("/api/browser/get_links")
@@ -2087,6 +2194,36 @@ async def dashboard_redirect():
 from mcp_server import TOOLS as MCP_TOOLS
 
 
+def _format_mcp_content(tool_name: str, result) -> list[dict]:
+    """Format a tool result into MCP content blocks.
+
+    For screenshot tools, returns an image content block so agents can
+    actually see the screenshot. For annotated screenshots, also includes
+    a text legend mapping label numbers to element selectors.
+    """
+    if isinstance(result, dict) and "screenshot_base64" in result:
+        b64 = result.pop("screenshot_base64")
+        content = [
+            {"type": "image", "data": b64, "mimeType": "image/png"},
+        ]
+        if "legend" in result:
+            legend = result.pop("legend")
+            content.append({
+                "type": "text",
+                "text": f"Page: {result.get('url', '')}\n"
+                        f"Interactive elements ({result.get('element_count', 0)}):\n{legend}",
+            })
+        else:
+            content.append({
+                "type": "text",
+                "text": f"Page: {result.get('url', '')}",
+            })
+        return content
+
+    text = json.dumps(result, indent=2) if not isinstance(result, str) else result
+    return [{"type": "text", "text": text}]
+
+
 async def _mcp_call_tool(name: str, args: dict):
     """
     Handle MCP tool calls by calling API route functions directly.
@@ -2181,6 +2318,9 @@ async def _mcp_call_tool(name: str, args: dict):
         elif name == "browser_screenshot":
             return await browser_screenshot({"full_page": args.get("full_page", False)})
 
+        elif name == "browser_screenshot_annotated":
+            return await browser_screenshot_annotated()
+
         elif name == "browser_get_links":
             return await browser_get_links()
 
@@ -2265,13 +2405,11 @@ async def mcp_endpoint(request: dict):
 
         try:
             result = await _mcp_call_tool(tool_name, tool_args)
-            text = json.dumps(result, indent=2) if not isinstance(result, str) else result
+            content = _format_mcp_content(tool_name, result)
             return {
                 "jsonrpc": "2.0",
                 "id": msg_id,
-                "result": {
-                    "content": [{"type": "text", "text": text}],
-                },
+                "result": {"content": content},
             }
         except Exception as e:
             return {
