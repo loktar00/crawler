@@ -1139,20 +1139,11 @@
     </div>
 
     <div id="login-active-section" class="hidden" style="margin-top:16px;">
-      <div style="background:var(--accent-dim); border:1px solid var(--accent); border-radius:var(--radius); padding:12px;">
-        <p style="font-size:13px; margin-bottom:4px;">
-          <strong id="login-active-label"></strong>
-        </p>
-        <p style="font-size:12px; color:var(--text2); margin-bottom:12px;" id="login-active-url"></p>
-        <p style="color:var(--yellow); font-size:12px; margin-bottom:12px;">
-          Use the browser panel below to log in, then click Save Session.
-        </p>
-        <div style="display:flex; gap:8px;">
-          <button class="btn btn-sm btn-primary" onclick="loginSave()">Save Session</button>
-          <button class="btn btn-sm btn-danger" onclick="loginCancel()">Cancel</button>
-          <button class="btn btn-sm btn-ghost" onclick="toggleBrowserPanel()">Open Browser Panel</button>
-        </div>
-      </div>
+      <p style="font-size:12px; color:var(--text2); margin-bottom:8px;">
+        Active login sessions — each runs on its own display. Click <strong>View</strong> to watch one,
+        log in, then <strong>Save</strong>.
+      </p>
+      <div id="login-sessions-list" style="display:flex; flex-direction:column; gap:8px;"></div>
     </div>
   </div>
 
@@ -2476,9 +2467,8 @@ async function loginOpen() {
     refreshLoginStatus();
     if (loginPollInterval) clearInterval(loginPollInterval);
     loginPollInterval = setInterval(refreshLoginStatus, 3000);
-    // Auto-open browser panel
-    const panel = document.getElementById('browser-panel');
-    if (!panel.classList.contains('open')) toggleBrowserPanel();
+    // Point the browser panel at this new session's display and open it.
+    viewSession(res.ws_port);
   } catch (e) {
     toast(e.message, 'error');
   } finally {
@@ -2490,20 +2480,48 @@ async function refreshLoginStatus() {
   try {
     const data = await api('/api/login/status');
     const section = document.getElementById('login-active-section');
-    if (data.active) {
+    const list = document.getElementById('login-sessions-list');
+    const sessions = data.sessions || [];
+    if (sessions.length) {
       section.classList.remove('hidden');
-      document.getElementById('login-active-label').textContent = data.label;
-      document.getElementById('login-active-url').textContent = data.url;
+      list.innerHTML = sessions.map(s => `
+        <div style="background:var(--accent-dim); border:1px solid var(--accent); border-radius:var(--radius); padding:12px;">
+          <p style="font-size:13px; margin-bottom:2px;">
+            <strong>${esc(s.label || s.url)}</strong>
+            <span class="badge badge-completed" style="margin-left:6px;">${esc(s.display || '')}</span>
+          </p>
+          <p style="font-size:12px; color:var(--text2); margin-bottom:10px; word-break:break-all;">${esc(s.url)}</p>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <button class="btn btn-sm btn-ghost" onclick="viewSession(${s.ws_port})">View</button>
+            <button class="btn btn-sm btn-primary" onclick="loginSave('${s.session_id}')">Save Session</button>
+            <button class="btn btn-sm btn-danger" onclick="loginCancel('${s.session_id}')">Cancel</button>
+          </div>
+        </div>`).join('');
     } else {
       section.classList.add('hidden');
+      list.innerHTML = '';
       if (loginPollInterval) { clearInterval(loginPollInterval); loginPollInterval = null; }
     }
   } catch { /* ignore */ }
 }
 
-async function loginSave() {
+// Point the browser panel's VNC view at a specific session's display.
+function viewSession(wsPort) {
+  if (wsPort) activeVncPort = wsPort;
+  vncLoaded = false;
+  const panel = document.getElementById('browser-panel');
+  if (!panel.classList.contains('open')) {
+    toggleBrowserPanel();
+  } else {
+    document.getElementById('vnc-iframe').src = vncUrl(activeVncPort);
+    vncLoaded = true;
+  }
+}
+
+async function loginSave(sessionId) {
   try {
-    const res = await api('/api/login/save', { method: 'POST' });
+    const body = sessionId ? JSON.stringify({ session_id: sessionId }) : undefined;
+    const res = await api('/api/login/save', { method: 'POST', body });
     toast(res.message || `Session saved (${res.cookies_saved} cookies)`);
     refreshLoginStatus();
     loadSavedSessions();
@@ -2512,9 +2530,10 @@ async function loginSave() {
   }
 }
 
-async function loginCancel() {
+async function loginCancel(sessionId) {
   try {
-    await api('/api/login/cancel', { method: 'POST' });
+    const body = sessionId ? JSON.stringify({ session_id: sessionId }) : undefined;
+    await api('/api/login/cancel', { method: 'POST', body });
     toast('Login cancelled');
     refreshLoginStatus();
   } catch (e) {

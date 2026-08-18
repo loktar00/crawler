@@ -12,7 +12,9 @@ Usage:
 
 import asyncio
 import json
+import logging
 import os
+import shutil
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -75,6 +77,8 @@ DEFAULT_ALLOWED_TOOLS = os.environ.get(
 MAX_TIMEOUT = 600  # 10 minutes
 RECIPES_DIR = Path(os.environ.get("CRAWLER_RECIPES_DIR", os.path.join(WORKING_DIR, "recipes")))
 VENV_PYTHON = os.environ.get("CRAWLER_VENV_PYTHON", sys.executable)
+logger = logging.getLogger("crawler.api")
+
 XDISPLAY = os.environ.get("DISPLAY", ":99")
 
 # --- Display Manager (multi-VNC) ---
@@ -331,6 +335,70 @@ async def run_task(req: TaskRequest):
 
 MCP_PROFILE_DIR = Path(DATA_DIR) / "browser_session" / "mcp_profile"
 
+# Per-session Chrome profiles for concurrent sessions. The "default" session
+# reuses MCP_PROFILE_DIR (shared with the agent driver + headless crawler);
+# every other session gets its own isolated profile dir so Chrome's
+# SingletonLock doesn't collide when multiple browsers run at once.
+SESSION_PROFILES_DIR = Path(DATA_DIR) / "browser_session" / "session_profiles"
+
+DEFAULT_SESSION_ID = "default"
+
+
+def _session_profile_dir(session_id: str) -> Path:
+    """Chrome user-data-dir for a session. Default reuses the shared profile."""
+    if session_id == DEFAULT_SESSION_ID:
+        return MCP_PROFILE_DIR
+    return SESSION_PROFILES_DIR / session_id
+
+
+async def _alloc_session_display(session_id: str) -> dict:
+    """Reserve a display for a session.
+
+    The default session lives on the base display (:99, systemd-managed).
+    Any other session gets its own Xvfb/x11vnc/websockify stack so it can be
+    viewed and driven independently. Returns display metadata.
+    """
+    if session_id == DEFAULT_SESSION_ID:
+        default = display_manager.get_default()
+        return {
+            "display": XDISPLAY,
+            "display_num": default.display_num if default else None,
+            "vnc_port": default.vnc_port if default else None,
+            "ws_port": default.ws_port if default else None,
+        }
+    sess = await display_manager.allocate(task_id=f"session-{session_id}")
+    return {
+        "display": sess.display,
+        "display_num": sess.display_num,
+        "vnc_port": sess.vnc_port,
+        "ws_port": sess.ws_port,
+    }
+
+
+async def _free_session_display(display_num) -> None:
+    """Tear down a session's display, unless it's the default base display."""
+    if display_num is None:
+        return
+    default = display_manager.get_default()
+    if default and display_num == default.display_num:
+        return
+    try:
+        await display_manager.deallocate(display_num)
+    except Exception:
+        logger.exception("Failed to deallocate display :%s", display_num)
+
+
+def _cleanup_session_profile(session_id: str) -> None:
+    """Remove an isolated session profile dir (never the shared default)."""
+    if session_id == DEFAULT_SESSION_ID:
+        return
+    prof = SESSION_PROFILES_DIR / session_id
+    try:
+        if prof.exists():
+            shutil.rmtree(prof, ignore_errors=True)
+    except Exception:
+        logger.exception("Failed to remove session profile %s", prof)
+
 
 @app.post("/task/stream")
 async def run_task_stream(req: TaskRequest):
@@ -565,41 +633,41 @@ class LoginOpenRequest(BaseModel):
 
 @app.post("/api/login/open")
 async def login_open(req: LoginOpenRequest):
-    """Open a non-headless browser for manual login. View via Browser tab."""
-    # Kill any existing login session
-    for sid, sess in list(login_sessions.items()):
-        proc = sess.get("proc")
-        if proc and proc.returncode is None:
-            try:
-                proc.kill()
-                await proc.wait()
-            except Exception:
-                pass
-        login_sessions.pop(sid, None)
+    """Open a non-headless browser for manual login. View via Browser tab.
 
+    Each call opens an INDEPENDENT session on its own display + Chrome profile,
+    so several logins can run at once. Nothing existing is killed.
+    """
     session_id = str(uuid.uuid4())[:8]
 
-    # Script that opens browser using MCP's persistent Chrome profile,
-    # loads existing cookies, navigates to URL,
-    # waits for SAVE signal on stdin, then saves cookies and exits.
+    # Reserve a dedicated display (its own Xvfb/x11vnc/websockify) so this
+    # login can be viewed and driven separately from any other session.
+    try:
+        disp = await _alloc_session_display(session_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+    profile_dir = _session_profile_dir(session_id)
+
+    # Script opens Chrome on this session's profile, loads existing cookies,
+    # navigates to URL, waits for SAVE on stdin, then saves cookies and exits.
     script = f'''
 import json, sys, signal, time, random
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 COOKIES_FILE = Path("{COOKIES_FILE}")
-MCP_PROFILE = Path("{MCP_PROFILE_DIR}")
-MCP_PROFILE.mkdir(parents=True, exist_ok=True)
+PROFILE = Path("{profile_dir}")
+PROFILE.mkdir(parents=True, exist_ok=True)
 
 with sync_playwright() as p:
     vw = 1280 + random.randint(-50, 50)
     vh = 900 + random.randint(-50, 50)
 
-    # Use persistent context with same Chrome profile as the MCP browser.
     # channel="chrome" runs real Google Chrome; no user_agent override so the
     # Linux fingerprint stays self-consistent (what Turnstile actually checks).
     ctx = p.chromium.launch_persistent_context(
-        user_data_dir=str(MCP_PROFILE),
+        user_data_dir=str(PROFILE),
         channel="chrome",
         headless=False,
         args=[
@@ -613,7 +681,7 @@ with sync_playwright() as p:
         timezone_id="America/New_York",
     )
 
-    # Also load cookies from cookies.json for sites logged in before this change
+    # Seed cookies.json so prior logins carry into this fresh session profile.
     if COOKIES_FILE.exists():
         try:
             cookies = json.loads(COOKIES_FILE.read_text())
@@ -660,7 +728,7 @@ with sync_playwright() as p:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=WORKING_DIR,
-        env=_display_env(),
+        env=_display_env(disp["display"]),
     )
 
     # Wait for the page to load
@@ -673,6 +741,8 @@ with sync_playwright() as p:
         proc.kill()
         stderr = await proc.stderr.read()
         await proc.wait()
+        await _free_session_display(disp["display_num"])
+        _cleanup_session_profile(session_id)
         err_msg = stderr.decode("utf-8", errors="replace").strip()
         detail = "Browser failed to open"
         if err_msg:
@@ -686,27 +756,68 @@ with sync_playwright() as p:
         "proc": proc,
         "status": "open",
         "opened_at": datetime.now(timezone.utc).isoformat(),
+        "display": disp["display"],
+        "display_num": disp["display_num"],
+        "vnc_port": disp["vnc_port"],
+        "ws_port": disp["ws_port"],
     }
 
     return {
         "session_id": session_id,
         "status": "open",
-        "message": f"Browser opened at {req.url}. Log in via the Browser View tab, then click Save Session.",
+        "display": disp["display"],
+        "display_num": disp["display_num"],
+        "ws_port": disp["ws_port"],
+        "vnc_port": disp["vnc_port"],
+        "message": f"Browser opened at {req.url} on display {disp['display']}. "
+                   "Log in via the Browser View tab, then click Save Session.",
     }
 
 
-@app.post("/api/login/save")
-async def login_save():
-    """Save cookies from the active login browser and close it."""
+def _resolve_login_session(session_id: str | None) -> dict:
+    """Pick the login session to act on.
+
+    Explicit session_id wins. Otherwise, if exactly one session is open, use it
+    (backward compatible). If several are open and none was named, refuse so the
+    caller can't act on the wrong browser.
+    """
+    if session_id:
+        sess = login_sessions.get(session_id)
+        if not sess or sess["status"] != "open":
+            raise HTTPException(status_code=404, detail=f"No open login session '{session_id}'")
+        return sess
     active = [s for s in login_sessions.values() if s["status"] == "open"]
     if not active:
         raise HTTPException(status_code=404, detail="No active login session")
+    if len(active) > 1:
+        ids = ", ".join(s["session_id"] for s in active)
+        raise HTTPException(
+            status_code=409,
+            detail=f"Multiple login sessions open ({ids}); specify session_id.",
+        )
+    return active[0]
 
-    sess = active[0]
+
+async def _teardown_login_session(sess: dict) -> None:
+    """Free a login session's display + isolated profile after it closes."""
+    await _free_session_display(sess.get("display_num"))
+    _cleanup_session_profile(sess["session_id"])
+
+
+class LoginActionRequest(BaseModel):
+    session_id: str | None = None
+
+
+@app.post("/api/login/save")
+async def login_save(req: LoginActionRequest = None):
+    """Save cookies from a login browser and close it. Targets session_id if given."""
+    req = req or LoginActionRequest()
+    sess = _resolve_login_session(req.session_id)
     proc = sess["proc"]
 
     if proc.returncode is not None:
         sess["status"] = "closed"
+        await _teardown_login_session(sess)
         raise HTTPException(status_code=400, detail="Browser already closed")
 
     # Send SAVE command
@@ -717,39 +828,37 @@ async def login_save():
         raise HTTPException(status_code=500, detail=f"Failed to send save signal: {e}")
 
     # Wait for confirmation
+    count = "?"
     try:
         while True:
             line = await asyncio.wait_for(proc.stdout.readline(), timeout=15)
             decoded = line.decode("utf-8", errors="replace").strip()
             if decoded.startswith("SAVED"):
                 count = decoded.split()[-1] if " " in decoded else "?"
-                sess["status"] = "saved"
                 await proc.wait()
-                return {
-                    "status": "saved",
-                    "cookies_saved": count,
-                    "cookies_file": str(COOKIES_FILE),
-                    "message": f"Session saved ({count} cookies). Future headless crawls will use these cookies.",
-                }
+                break
             if decoded == "CLOSED":
                 break
     except asyncio.TimeoutError:
-        pass
+        proc.kill()
+        await proc.wait()
 
-    proc.kill()
-    await proc.wait()
     sess["status"] = "saved"
-    return {"status": "saved", "cookies_file": str(COOKIES_FILE)}
+    await _teardown_login_session(sess)
+    return {
+        "status": "saved",
+        "session_id": sess["session_id"],
+        "cookies_saved": count,
+        "cookies_file": str(COOKIES_FILE),
+        "message": f"Session saved ({count} cookies). Future headless crawls will use these cookies.",
+    }
 
 
 @app.post("/api/login/cancel")
-async def login_cancel():
-    """Close the login browser without saving."""
-    active = [s for s in login_sessions.values() if s["status"] == "open"]
-    if not active:
-        raise HTTPException(status_code=404, detail="No active login session")
-
-    sess = active[0]
+async def login_cancel(req: LoginActionRequest = None):
+    """Close a login browser without saving. Targets session_id if given."""
+    req = req or LoginActionRequest()
+    sess = _resolve_login_session(req.session_id)
     proc = sess["proc"]
 
     if proc.returncode is None:
@@ -762,26 +871,43 @@ async def login_cancel():
             await proc.wait()
 
     sess["status"] = "cancelled"
-    return {"status": "cancelled"}
+    await _teardown_login_session(sess)
+    return {"status": "cancelled", "session_id": sess["session_id"]}
 
 
 @app.get("/api/login/status")
 async def login_status():
-    """Get current login session status."""
-    active = [s for s in login_sessions.values() if s["status"] == "open"]
-    if not active:
-        return {"active": False}
-    sess = active[0]
-    # Check if process is still alive
-    if sess["proc"].returncode is not None:
-        sess["status"] = "closed"
-        return {"active": False}
+    """List all active login sessions (each with its display + VNC port)."""
+    sessions = []
+    for sess in list(login_sessions.values()):
+        if sess["status"] != "open":
+            continue
+        if sess["proc"].returncode is not None:
+            sess["status"] = "closed"
+            await _teardown_login_session(sess)
+            continue
+        sessions.append({
+            "session_id": sess["session_id"],
+            "url": sess["url"],
+            "label": sess["label"],
+            "opened_at": sess["opened_at"],
+            "display": sess.get("display"),
+            "display_num": sess.get("display_num"),
+            "ws_port": sess.get("ws_port"),
+            "vnc_port": sess.get("vnc_port"),
+        })
+    # Keep legacy single-session fields populated from the first session so
+    # any older client still works.
+    first = sessions[0] if sessions else None
     return {
-        "active": True,
-        "session_id": sess["session_id"],
-        "url": sess["url"],
-        "label": sess["label"],
-        "opened_at": sess["opened_at"],
+        "active": bool(sessions),
+        "count": len(sessions),
+        "sessions": sessions,
+        "session_id": first["session_id"] if first else None,
+        "url": first["url"] if first else None,
+        "label": first["label"] if first else None,
+        "opened_at": first["opened_at"] if first else None,
+        "ws_port": first["ws_port"] if first else None,
     }
 
 
@@ -802,14 +928,36 @@ async def list_saved_sessions():
 # Keeps a browser open across requests so an external agent can drive it
 # interactively: navigate, click, type, take snapshots, etc.
 
-browser_session: dict = {"proc": None, "status": "closed"}
+# Registry of concurrent driver sessions, keyed by session_id. The "default"
+# session preserves the original single-browser behavior (shared MCP profile on
+# display :99); agents open additional named sessions and pin work to them by
+# passing session_id on each call.
+browser_sessions: dict[str, dict] = {}
 browser_recording: dict = {"active": False, "steps": [], "seq": 0}
-_browser_lock = asyncio.Lock()
 
 
-def _browser_script() -> str:
+def _browser_entry(session_id: str) -> dict:
+    """Get (or lazily create) the registry entry for a driver session."""
+    entry = browser_sessions.get(session_id)
+    if entry is None:
+        entry = {
+            "session_id": session_id,
+            "proc": None,
+            "status": "closed",
+            "lock": asyncio.Lock(),
+            "display": None,
+            "display_num": None,
+            "ws_port": None,
+            "vnc_port": None,
+        }
+        browser_sessions[session_id] = entry
+    return entry
+
+
+def _browser_script(profile_dir: Path) -> str:
     """Python script that runs in a subprocess, keeps a browser alive,
     and accepts JSON commands on stdin, returning JSON results on stdout."""
+    MCP_PROFILE_DIR = profile_dir  # noqa: F841 (used via f-string interpolation below)
     return f'''
 import json, sys, signal, time, random, base64, traceback
 from pathlib import Path
@@ -1092,14 +1240,26 @@ with sync_playwright() as p:
 '''
 
 
-@app.post("/api/browser/open")
-async def browser_open():
-    """Open a persistent browser session. Loads saved cookies."""
-    proc = browser_session.get("proc")
-    if proc and proc.returncode is None:
-        return {"status": "already_open", "message": "Browser session already active."}
+async def _open_browser_session(session_id: str) -> dict:
+    """Start the driver subprocess for a session on its display + profile.
 
-    script = _browser_script()
+    The default session keeps the original behavior (display :99, shared MCP
+    profile). Named sessions get an allocated display + isolated profile.
+    """
+    entry = _browser_entry(session_id)
+    proc = entry.get("proc")
+    if proc and proc.returncode is None:
+        return {"status": "already_open", "session_id": session_id,
+                "message": "Browser session already active.",
+                "display": entry.get("display"), "ws_port": entry.get("ws_port")}
+
+    # Reserve a display if this session doesn't have one yet.
+    if entry.get("display") is None:
+        disp = await _alloc_session_display(session_id)
+        entry.update(disp)
+
+    profile_dir = _session_profile_dir(session_id)
+    script = _browser_script(profile_dir)
     proc = await asyncio.create_subprocess_exec(
         VENV_PYTHON, "-c", script,
         stdin=asyncio.subprocess.PIPE,
@@ -1107,7 +1267,7 @@ async def browser_open():
         stderr=asyncio.subprocess.PIPE,
         limit=10 * 1024 * 1024,  # 10MB line buffer for large payloads (screenshots)
         cwd=WORKING_DIR,
-        env=_display_env(),
+        env=_display_env(entry.get("display")),
     )
 
     try:
@@ -1122,32 +1282,121 @@ async def browser_open():
         err = stderr.decode("utf-8", errors="replace").strip()
         raise HTTPException(status_code=500, detail=f"Browser failed to start: {err}")
 
-    browser_session["proc"] = proc
-    browser_session["status"] = "open"
-    return {"status": "open", "message": "Browser session started with saved cookies."}
+    entry["proc"] = proc
+    entry["status"] = "open"
+    return {"status": "open", "session_id": session_id,
+            "display": entry.get("display"), "ws_port": entry.get("ws_port"),
+            "message": "Browser session started with saved cookies."}
 
 
-async def _browser_cmd(cmd: dict, _retried: bool = False) -> dict:
-    """Send a command to the persistent browser and return the result.
+@app.post("/api/browser/open")
+async def browser_open(req: dict = None):
+    """Open a persistent browser session. Loads saved cookies.
 
-    Uses _browser_lock to serialize access to the subprocess stdin/stdout
-    pipes. Uses _cmd_id matching to skip spurious or stale stdout lines.
-    Auto-restarts the browser if it has crashed.
+    Pass session_id to open/target a specific concurrent session; omit it to
+    use the shared default session (original behavior).
     """
-    proc = browser_session.get("proc")
+    session_id = (req or {}).get("session_id") or DEFAULT_SESSION_ID
+    return await _open_browser_session(session_id)
+
+
+@app.post("/api/browser/session/open")
+async def browser_session_open(req: dict = None):
+    """Allocate a NEW isolated driver session (own display + profile).
+
+    Returns the session_id an agent pins to by passing it on later calls, plus
+    the display / VNC websocket port for viewing it.
+    """
+    req = req or {}
+    session_id = req.get("session_id") or str(uuid.uuid4())[:8]
+    if session_id == DEFAULT_SESSION_ID:
+        raise HTTPException(status_code=400, detail="Use /api/browser/open for the default session")
+    entry = _browser_entry(session_id)
+    entry["label"] = req.get("label", "")
+    try:
+        info = await _open_browser_session(session_id)
+    except Exception:
+        # Roll back a half-allocated session so we don't leak a display.
+        await _free_session_display(entry.get("display_num"))
+        _cleanup_session_profile(session_id)
+        browser_sessions.pop(session_id, None)
+        raise
+    if req.get("url"):
+        await _browser_cmd({"action": "navigate", "url": req["url"]}, session_id=session_id)
+    return {**info, "label": entry.get("label", ""),
+            "vnc_port": entry.get("vnc_port"), "display_num": entry.get("display_num")}
+
+
+@app.get("/api/browser/sessions")
+async def browser_sessions_list():
+    """List active driver sessions and their displays."""
+    out = []
+    for sid, e in browser_sessions.items():
+        proc = e.get("proc")
+        alive = bool(proc and proc.returncode is None)
+        out.append({
+            "session_id": sid,
+            "label": e.get("label", ""),
+            "status": "open" if alive else "closed",
+            "display": e.get("display"),
+            "display_num": e.get("display_num"),
+            "ws_port": e.get("ws_port"),
+            "vnc_port": e.get("vnc_port"),
+            "is_default": sid == DEFAULT_SESSION_ID,
+        })
+    return {"sessions": out, "count": len(out)}
+
+
+@app.post("/api/browser/session/close")
+async def browser_session_close(req: dict):
+    """Close a driver session and free its display + profile."""
+    session_id = req.get("session_id")
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_id required")
+    entry = browser_sessions.get(session_id)
+    if not entry:
+        raise HTTPException(status_code=404, detail=f"No session '{session_id}'")
+    proc = entry.get("proc")
+    if proc and proc.returncode is None:
+        try:
+            await _browser_cmd({"action": "close"}, session_id=session_id)
+        except Exception:
+            pass
+        proc = entry.get("proc")
+        if proc and proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+    await _free_session_display(entry.get("display_num"))
+    _cleanup_session_profile(session_id)
+    browser_sessions.pop(session_id, None)
+    return {"status": "closed", "session_id": session_id}
+
+
+async def _browser_cmd(cmd: dict, session_id: str = None, _retried: bool = False) -> dict:
+    """Send a command to a session's persistent browser and return the result.
+
+    session_id selects which concurrent browser to drive (default when omitted).
+    Uses the session's own lock to serialize access to its subprocess pipes, and
+    _cmd_id matching to skip spurious or stale stdout lines. Auto-restarts the
+    browser if it has crashed.
+    """
+    session_id = session_id or DEFAULT_SESSION_ID
+    entry = _browser_entry(session_id)
+    lock = entry["lock"]
+    proc = entry.get("proc")
     if not proc or proc.returncode is not None:
         if _retried:
             raise HTTPException(status_code=500, detail="Browser crashed and auto-restart failed.")
-        browser_session["status"] = "closed"
-        browser_session["proc"] = None
-        await browser_open()
-        return await _browser_cmd(cmd, _retried=True)
+        entry["status"] = "closed"
+        entry["proc"] = None
+        await _open_browser_session(session_id)
+        return await _browser_cmd(cmd, session_id=session_id, _retried=True)
 
     cmd_id = str(uuid.uuid4())[:8]
     cmd["_cmd_id"] = cmd_id
     crashed = False
 
-    async with _browser_lock:
+    async with lock:
         try:
             proc.stdin.write((json.dumps(cmd) + "\n").encode())
             await proc.stdin.drain()
@@ -1203,8 +1452,8 @@ async def _browser_cmd(cmd: dict, _retried: bool = False) -> dict:
                 await proc.wait()
             except Exception:
                 pass
-            browser_session["status"] = "closed"
-            browser_session["proc"] = None
+            entry["status"] = "closed"
+            entry["proc"] = None
             raise HTTPException(
                 status_code=504,
                 detail="Browser command timed out; session reset."
@@ -1219,15 +1468,15 @@ async def _browser_cmd(cmd: dict, _retried: bool = False) -> dict:
 
     # Outside lock -- handle crash with restart
     if crashed:
-        browser_session["status"] = "closed"
-        browser_session["proc"] = None
+        entry["status"] = "closed"
+        entry["proc"] = None
         if _retried:
             raise HTTPException(
                 status_code=500,
                 detail="Browser crashed during command."
             )
-        await browser_open()
-        return await _browser_cmd(cmd, _retried=True)
+        await _open_browser_session(session_id)
+        return await _browser_cmd(cmd, session_id=session_id, _retried=True)
 
 
 def _describe_step(action: str, cmd: dict) -> str:
@@ -1252,7 +1501,7 @@ def _describe_step(action: str, cmd: dict) -> str:
 @app.post("/api/browser/navigate")
 async def browser_navigate(req: dict):
     """Navigate to a URL."""
-    return await _browser_cmd({"action": "navigate", "url": req["url"]})
+    return await _browser_cmd({"action": "navigate", "url": req["url"]}, session_id=req.get("session_id"))
 
 
 @app.post("/api/browser/click")
@@ -1265,45 +1514,57 @@ async def browser_click(req: dict):
         cmd["text"] = req["text"]
     else:
         raise HTTPException(status_code=400, detail="Provide 'selector' or 'text'")
-    return await _browser_cmd(cmd)
+    return await _browser_cmd(cmd, session_id=req.get("session_id"))
 
 
 @app.post("/api/browser/type")
 async def browser_type(req: dict):
     """Type text into an element by CSS selector."""
-    return await _browser_cmd({"action": "type", "selector": req["selector"], "text": req["text"]})
+    return await _browser_cmd(
+        {"action": "type", "selector": req["selector"], "text": req["text"]},
+        session_id=req.get("session_id"),
+    )
 
 
 @app.post("/api/browser/press_key")
 async def browser_press_key(req: dict):
     """Press a keyboard key (e.g. Enter, Tab, Escape)."""
-    return await _browser_cmd({"action": "press_key", "key": req.get("key", "Enter")})
+    return await _browser_cmd(
+        {"action": "press_key", "key": req.get("key", "Enter")},
+        session_id=req.get("session_id"),
+    )
 
 
 @app.post("/api/browser/snapshot")
-async def browser_snapshot():
+async def browser_snapshot(req: dict = None):
     """Get the current page text content, URL, and title."""
-    return await _browser_cmd({"action": "snapshot"})
+    req = req or {}
+    return await _browser_cmd({"action": "snapshot"}, session_id=req.get("session_id"))
 
 
 @app.post("/api/browser/screenshot")
 async def browser_screenshot(req: dict = None):
     """Take a screenshot. Returns base64-encoded PNG."""
     req = req or {}
-    return await _browser_cmd({"action": "screenshot", "full_page": req.get("full_page", False)})
+    return await _browser_cmd(
+        {"action": "screenshot", "full_page": req.get("full_page", False)},
+        session_id=req.get("session_id"),
+    )
 
 
 @app.post("/api/browser/screenshot/annotated")
-async def browser_screenshot_annotated():
+async def browser_screenshot_annotated(req: dict = None):
     """Take a screenshot with numbered labels on all clickable elements.
     Returns base64-encoded PNG plus a legend mapping numbers to selectors."""
-    return await _browser_cmd({"action": "screenshot_annotated"})
+    req = req or {}
+    return await _browser_cmd({"action": "screenshot_annotated"}, session_id=req.get("session_id"))
 
 
 @app.post("/api/browser/get_links")
-async def browser_get_links():
+async def browser_get_links(req: dict = None):
     """Get all links on the current page."""
-    return await _browser_cmd({"action": "get_links"})
+    req = req or {}
+    return await _browser_cmd({"action": "get_links"}, session_id=req.get("session_id"))
 
 
 @app.post("/api/browser/scroll")
@@ -1313,13 +1574,16 @@ async def browser_scroll(req: dict):
         "action": "scroll",
         "direction": req.get("direction", "down"),
         "amount": req.get("amount", 500),
-    })
+    }, session_id=req.get("session_id"))
 
 
 @app.post("/api/browser/evaluate")
 async def browser_evaluate(req: dict):
     """Run JavaScript in the browser and return the result."""
-    return await _browser_cmd({"action": "evaluate", "expression": req["expression"]})
+    return await _browser_cmd(
+        {"action": "evaluate", "expression": req["expression"]},
+        session_id=req.get("session_id"),
+    )
 
 
 @app.post("/api/browser/tab/open")
@@ -1329,55 +1593,75 @@ async def browser_tab_open(req: dict = None):
     cmd = {"action": "tab_open"}
     if req.get("url"):
         cmd["url"] = req["url"]
-    return await _browser_cmd(cmd)
+    return await _browser_cmd(cmd, session_id=req.get("session_id"))
 
 
 @app.post("/api/browser/tab/close")
-async def browser_tab_close():
+async def browser_tab_close(req: dict = None):
     """Close the current tab and switch to the last remaining tab."""
-    return await _browser_cmd({"action": "tab_close"})
+    req = req or {}
+    return await _browser_cmd({"action": "tab_close"}, session_id=req.get("session_id"))
 
 
 @app.get("/api/browser/tab/list")
-async def browser_tab_list():
+async def browser_tab_list(session_id: str = None):
     """List all open tabs with their URLs and titles."""
-    return await _browser_cmd({"action": "tab_list"})
+    return await _browser_cmd({"action": "tab_list"}, session_id=session_id)
 
 
 @app.post("/api/browser/tab/switch")
 async def browser_tab_switch(req: dict):
     """Switch to a tab by index."""
-    return await _browser_cmd({"action": "tab_switch", "index": req.get("index", 0)})
+    return await _browser_cmd(
+        {"action": "tab_switch", "index": req.get("index", 0)},
+        session_id=req.get("session_id"),
+    )
 
 
 @app.post("/api/browser/close")
-async def browser_close():
-    """Close the persistent browser session and save cookies."""
-    proc = browser_session.get("proc")
+async def browser_close(req: dict = None):
+    """Close a persistent browser session and save cookies (default if unspecified)."""
+    session_id = (req or {}).get("session_id") or DEFAULT_SESSION_ID
+    entry = browser_sessions.get(session_id)
+    proc = entry.get("proc") if entry else None
     if not proc or proc.returncode is not None:
-        browser_session["status"] = "closed"
-        return {"status": "already_closed"}
+        if entry:
+            entry["status"] = "closed"
+        return {"status": "already_closed", "session_id": session_id}
 
     try:
-        result = await _browser_cmd({"action": "close"})
+        await _browser_cmd({"action": "close"}, session_id=session_id)
     except Exception:
+        pass
+    proc = entry.get("proc")
+    if proc and proc.returncode is None:
         proc.kill()
         await proc.wait()
-    browser_session["status"] = "closed"
-    browser_session["proc"] = None
-    return {"status": "closed"}
+    entry["status"] = "closed"
+    entry["proc"] = None
+    # Non-default sessions release their display + isolated profile on close.
+    if session_id != DEFAULT_SESSION_ID:
+        await _free_session_display(entry.get("display_num"))
+        _cleanup_session_profile(session_id)
+        browser_sessions.pop(session_id, None)
+    return {"status": "closed", "session_id": session_id}
 
 
 @app.get("/api/browser/status")
-async def browser_status():
-    """Check if a browser session is active."""
-    proc = browser_session.get("proc")
+async def browser_status(session_id: str = None):
+    """Check if a browser session is active (default session if unspecified)."""
+    sid = session_id or DEFAULT_SESSION_ID
+    entry = browser_sessions.get(sid)
+    proc = entry.get("proc") if entry else None
     alive = proc is not None and proc.returncode is None
-    if not alive:
-        browser_session["status"] = "closed"
+    if entry and not alive:
+        entry["status"] = "closed"
     return {
         "active": alive,
-        "status": browser_session["status"],
+        "status": entry["status"] if entry else "closed",
+        "session_id": sid,
+        "display": entry.get("display") if entry else None,
+        "ws_port": entry.get("ws_port") if entry else None,
         "recording": browser_recording["active"],
         "recorded_steps": len(browser_recording["steps"]),
     }

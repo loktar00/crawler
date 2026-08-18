@@ -149,7 +149,7 @@ TOOLS = [
     },
     {
         "name": "crawler_login_open",
-        "description": "Open a browser on the server for manual login to a website. The browser stays open for VNC-based interaction.",
+        "description": "Open a browser on the server for manual login to a website. Each call opens an INDEPENDENT session on its own display, so several logins can run at once. Returns a session_id and the VNC websocket port for viewing it.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -161,23 +161,124 @@ TOOLS = [
     },
     {
         "name": "crawler_login_save",
-        "description": "Save cookies from the active login browser session. Call after the user has logged in.",
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "description": "Save cookies from a login browser session and close it. Call after the user has logged in. Pass session_id when more than one login is open.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string", "description": "Which login session to save (optional if only one is open)"},
+            },
+            "required": [],
+        },
     },
     {
         "name": "crawler_login_cancel",
-        "description": "Close the active login browser without saving cookies.",
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "description": "Close a login browser without saving cookies. Pass session_id when more than one login is open.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string", "description": "Which login session to cancel (optional if only one is open)"},
+            },
+            "required": [],
+        },
     },
     {
         "name": "crawler_login_status",
-        "description": "Check if there is an active login browser session.",
+        "description": "List all active login browser sessions, each with its session_id, display, and VNC websocket port.",
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
     {
         "name": "crawler_login_sessions",
         "description": "List domains with saved login cookies.",
         "inputSchema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "crawler_session_open",
+        "description": "Open a NEW isolated agent browser session (its own display + Chrome profile) and return its session_id. Pin subsequent browser actions to it by passing that session_id. Use this to run several browsers concurrently without them interfering.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "label": {"type": "string", "description": "Friendly name, e.g. 'suno'"},
+                "url": {"type": "string", "description": "Optional URL to navigate to immediately"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "crawler_session_list",
+        "description": "List active agent browser sessions with their session_id, display, and VNC websocket port.",
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "crawler_session_close",
+        "description": "Close an agent browser session and free its display + profile.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string", "description": "The session to close"},
+            },
+            "required": ["session_id"],
+        },
+    },
+    {
+        "name": "crawler_browser_navigate",
+        "description": "Navigate a browser session to a URL. Pass session_id to target a specific pinned session; omit it to use the default shared session.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "URL to navigate to"},
+                "session_id": {"type": "string", "description": "Session to drive (optional; default session if omitted)"},
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "crawler_browser_click",
+        "description": "Click an element by CSS selector or visible text in a browser session.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "selector": {"type": "string", "description": "CSS selector to click"},
+                "text": {"type": "string", "description": "Visible text to click (if no selector)"},
+                "session_id": {"type": "string", "description": "Session to drive (optional)"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "crawler_browser_type",
+        "description": "Type text into an element (by CSS selector) in a browser session.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "selector": {"type": "string", "description": "CSS selector of the field"},
+                "text": {"type": "string", "description": "Text to type"},
+                "session_id": {"type": "string", "description": "Session to drive (optional)"},
+            },
+            "required": ["selector", "text"],
+        },
+    },
+    {
+        "name": "crawler_browser_snapshot",
+        "description": "Get the current page's text content, URL, and title from a browser session.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string", "description": "Session to read (optional)"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "crawler_browser_evaluate",
+        "description": "Run JavaScript in a browser session and return the result.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "expression": {"type": "string", "description": "JavaScript expression to evaluate"},
+                "session_id": {"type": "string", "description": "Session to drive (optional)"},
+            },
+            "required": ["expression"],
+        },
     },
     {
         "name": "crawler_list_files",
@@ -433,16 +534,61 @@ def handle_tool(name: str, args: dict, api_url: str, api_key: str) -> Any:
         return call("/api/login/open", method="POST", body=body)
 
     elif name == "crawler_login_save":
-        return call("/api/login/save", method="POST")
+        body = {"session_id": args["session_id"]} if args.get("session_id") else {}
+        return call("/api/login/save", method="POST", body=body)
 
     elif name == "crawler_login_cancel":
-        return call("/api/login/cancel", method="POST")
+        body = {"session_id": args["session_id"]} if args.get("session_id") else {}
+        return call("/api/login/cancel", method="POST", body=body)
 
     elif name == "crawler_login_status":
         return call("/api/login/status")
 
     elif name == "crawler_login_sessions":
         return call("/api/login/sessions")
+
+    elif name == "crawler_session_open":
+        body = {}
+        if args.get("label"):
+            body["label"] = args["label"]
+        if args.get("url"):
+            body["url"] = args["url"]
+        return call("/api/browser/session/open", method="POST", body=body)
+
+    elif name == "crawler_session_list":
+        return call("/api/browser/sessions")
+
+    elif name == "crawler_session_close":
+        return call("/api/browser/session/close", method="POST", body={"session_id": args["session_id"]})
+
+    elif name == "crawler_browser_navigate":
+        body = {"url": args["url"]}
+        if args.get("session_id"):
+            body["session_id"] = args["session_id"]
+        return call("/api/browser/navigate", method="POST", body=body)
+
+    elif name == "crawler_browser_click":
+        body = {}
+        for k in ("selector", "text", "session_id"):
+            if args.get(k):
+                body[k] = args[k]
+        return call("/api/browser/click", method="POST", body=body)
+
+    elif name == "crawler_browser_type":
+        body = {"selector": args["selector"], "text": args["text"]}
+        if args.get("session_id"):
+            body["session_id"] = args["session_id"]
+        return call("/api/browser/type", method="POST", body=body)
+
+    elif name == "crawler_browser_snapshot":
+        body = {"session_id": args["session_id"]} if args.get("session_id") else {}
+        return call("/api/browser/snapshot", method="POST", body=body)
+
+    elif name == "crawler_browser_evaluate":
+        body = {"expression": args["expression"]}
+        if args.get("session_id"):
+            body["session_id"] = args["session_id"]
+        return call("/api/browser/evaluate", method="POST", body=body)
 
     elif name == "crawler_list_files":
         path = args.get("path", "")

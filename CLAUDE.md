@@ -158,6 +158,43 @@ curl -X DELETE http://localhost:8080/api/displays/101
 - For authenticated sites (Facebook, etc.), first run with `--visible` flag and log in via VNC
 - Or use `POST /auth-prepare` endpoint to open a login page on VNC display
 
+## Concurrent Sessions & Agent Pinning
+
+Both the manual-login flow and the agent browser driver support **multiple
+concurrent sessions**. Each non-default session gets its own allocated display
+(`:100`+) and its own isolated Chrome profile, so browsers never collide.
+
+**Browser fingerprint:** all sessions launch REAL Google Chrome
+(`channel="chrome"`) with no user_agent spoof and no `navigator.webdriver`
+override — this is what keeps Cloudflare/Turnstile (e.g. Suno) from flagging
+them. Don't reintroduce those disguises.
+
+### Manual login (multi-session)
+```bash
+# Each call opens an INDEPENDENT login on its own display; nothing is killed.
+POST /api/login/open   {"url": "...", "label": "..."}   # -> {session_id, display, ws_port, ...}
+GET  /api/login/status                                   # -> {sessions: [...]} (all active)
+POST /api/login/save   {"session_id": "..."}             # save cookies + close (id optional if only one)
+POST /api/login/cancel {"session_id": "..."}             # close without saving
+```
+
+### Agent browser driver (pin with session_id)
+```bash
+POST /api/browser/session/open  {"label": "...", "url": "..."}  # -> {session_id, display, ws_port}
+GET  /api/browser/sessions                                       # list active driver sessions
+POST /api/browser/session/close {"session_id": "..."}
+# Every /api/browser/* action (navigate, click, type, snapshot, evaluate, ...) accepts
+# an optional "session_id". Omit it to use the shared "default" session (display :99).
+POST /api/browser/navigate {"session_id": "abc123", "url": "..."}
+```
+An agent **pins** itself by opening a session, keeping the returned `session_id`,
+and passing it on every subsequent call. Omitting `session_id` targets the
+`default` session (original single-browser behavior — fully backward compatible).
+
+**MCP tools** mirror this: `crawler_session_open` / `crawler_session_list` /
+`crawler_session_close`, and `crawler_browser_navigate|click|type|snapshot|evaluate`
+(all take optional `session_id`). The login MCP tools take `session_id` too.
+
 ## Workflow System
 
 ### Record a workflow (AI-driven)
