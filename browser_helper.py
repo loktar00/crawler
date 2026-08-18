@@ -33,11 +33,17 @@ BROWSER_ARGS = [
     "--no-sandbox",
     "--disable-setuid-sandbox",
     "--start-maximized",
+    # Keep WebGL rendering alive under Xvfb (no GPU) so it doesn't report as
+    # "disabled", which is itself a bot signal. SwiftShader gives a plausible
+    # software renderer instead.
+    "--enable-unsafe-swiftshader",
 ]
 
-ANTI_DETECT_SCRIPT = """
-Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-"""
+# NOTE: We intentionally do NOT override navigator.webdriver in JS.
+# --disable-blink-features=AutomationControlled already sets it to false
+# natively; a JS override leaves a tampered property descriptor that
+# Cloudflare Turnstile can detect. Real Chrome + that flag is cleaner.
+ANTI_DETECT_SCRIPT = ""
 
 
 def create_context(browser, cookies_file=None):
@@ -45,12 +51,11 @@ def create_context(browser, cookies_file=None):
     vw = 1920 + random.randint(-100, 100)
     vh = 1080 + random.randint(-100, 100)
 
+    # No user_agent override: let real Chrome present its own, self-consistent
+    # Linux UA + Client Hints + platform + WebGL renderer. A matching Linux
+    # fingerprint passes Turnstile; a spoofed Windows UA guarantees a mismatch.
     ctx = browser.new_context(
         viewport={"width": vw, "height": vh},
-        user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        ),
         locale="en-US",
         timezone_id="America/New_York",
     )
@@ -70,7 +75,8 @@ def create_context(browser, cookies_file=None):
 def open_page(ctx, url, wait_ms=0):
     """Open a page with anti-detection and optional wait."""
     page = ctx.new_page()
-    page.add_init_script(ANTI_DETECT_SCRIPT)
+    if ANTI_DETECT_SCRIPT:
+        page.add_init_script(ANTI_DETECT_SCRIPT)
     page.goto(url, wait_until="domcontentloaded", timeout=60000)
     time.sleep(random.uniform(1.0, 2.5))
     if wait_ms > 0:
@@ -98,7 +104,7 @@ def output_json(data):
 
 def cmd_navigate(args):
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=args.headless, args=BROWSER_ARGS)
+        browser = p.chromium.launch(channel="chrome", headless=args.headless, args=BROWSER_ARGS)
         ctx = create_context(browser, args.cookies_file)
         page = open_page(ctx, args.url, args.wait)
 
@@ -115,7 +121,7 @@ def cmd_navigate(args):
 
 def cmd_screenshot(args):
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=args.headless, args=BROWSER_ARGS)
+        browser = p.chromium.launch(channel="chrome", headless=args.headless, args=BROWSER_ARGS)
         ctx = create_context(browser, args.cookies_file)
         page = open_page(ctx, args.url)
         page.screenshot(path=args.output_path, full_page=True)
@@ -125,7 +131,7 @@ def cmd_screenshot(args):
 
 def cmd_click(args):
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=args.headless, args=BROWSER_ARGS)
+        browser = p.chromium.launch(channel="chrome", headless=args.headless, args=BROWSER_ARGS)
         ctx = create_context(browser, args.cookies_file)
         page = open_page(ctx, args.url)
         page.click(args.selector, timeout=10000)
@@ -144,7 +150,7 @@ def cmd_click(args):
 
 def cmd_type(args):
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=args.headless, args=BROWSER_ARGS)
+        browser = p.chromium.launch(channel="chrome", headless=args.headless, args=BROWSER_ARGS)
         ctx = create_context(browser, args.cookies_file)
         page = open_page(ctx, args.url)
         page.fill(args.selector, args.text, timeout=10000)
@@ -157,7 +163,7 @@ def cmd_type(args):
 
 def cmd_evaluate(args):
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=args.headless, args=BROWSER_ARGS)
+        browser = p.chromium.launch(channel="chrome", headless=args.headless, args=BROWSER_ARGS)
         ctx = create_context(browser, args.cookies_file)
         page = open_page(ctx, args.url)
         result = page.evaluate(args.expression)
@@ -167,7 +173,7 @@ def cmd_evaluate(args):
 
 def cmd_dump_text(args):
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=args.headless, args=BROWSER_ARGS)
+        browser = p.chromium.launch(channel="chrome", headless=args.headless, args=BROWSER_ARGS)
         ctx = create_context(browser, args.cookies_file)
         page = open_page(ctx, args.url)
         text = page.evaluate("document.body.innerText")
@@ -177,7 +183,7 @@ def cmd_dump_text(args):
 
 def cmd_dump_links(args):
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=args.headless, args=BROWSER_ARGS)
+        browser = p.chromium.launch(channel="chrome", headless=args.headless, args=BROWSER_ARGS)
         ctx = create_context(browser, args.cookies_file)
         page = open_page(ctx, args.url)
         links = page.evaluate("""
@@ -193,7 +199,7 @@ def cmd_dump_links(args):
 def cmd_fill_and_submit(args):
     fields = json.loads(args.fields)
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=args.headless, args=BROWSER_ARGS)
+        browser = p.chromium.launch(channel="chrome", headless=args.headless, args=BROWSER_ARGS)
         ctx = create_context(browser, args.cookies_file)
         page = open_page(ctx, args.url)
 

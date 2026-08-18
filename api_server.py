@@ -459,14 +459,25 @@ async def auth_prepare(req: AuthPrepareRequest):
 import sys
 from playwright.sync_api import sync_playwright
 
+STEALTH_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--disable-dev-shm-usage",
+    "--no-sandbox",
+    "--enable-unsafe-swiftshader",
+]
+
 with sync_playwright() as p:
-    browser = p.chromium.launch(headless=False)
+    # Real Google Chrome (channel="chrome"), not Playwright's bundled Chromium.
+    browser = p.chromium.launch(channel="chrome", headless=False, args=STEALTH_ARGS)
+    # No user_agent override: real Chrome on Linux is self-consistent across
+    # UA / Client Hints / navigator.platform / WebGL. Spoofing Windows here
+    # is exactly what Cloudflare Turnstile flags.
     ctx = browser.new_context(
         viewport={{"width": 1280, "height": 900}},
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     )
     page = ctx.new_page()
-    page.add_init_script("Object.defineProperty(navigator, 'webdriver', {{get: () => undefined}});")
+    # No navigator.webdriver override: the AutomationControlled flag already
+    # sets it false natively; a JS override leaves a detectable tampered descriptor.
     page.goto("{req.url}", wait_until="domcontentloaded", timeout=60000)
     print("AUTH_READY", flush=True)
     # Keep browser open - user interacts via VNC
@@ -584,17 +595,20 @@ with sync_playwright() as p:
     vw = 1280 + random.randint(-50, 50)
     vh = 900 + random.randint(-50, 50)
 
-    # Use persistent context with same Chrome profile as the MCP browser
+    # Use persistent context with same Chrome profile as the MCP browser.
+    # channel="chrome" runs real Google Chrome; no user_agent override so the
+    # Linux fingerprint stays self-consistent (what Turnstile actually checks).
     ctx = p.chromium.launch_persistent_context(
         user_data_dir=str(MCP_PROFILE),
+        channel="chrome",
         headless=False,
         args=[
             "--disable-blink-features=AutomationControlled",
             "--disable-dev-shm-usage",
             "--no-sandbox",
+            "--enable-unsafe-swiftshader",
         ],
         viewport={{"width": vw, "height": vh}},
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         locale="en-US",
         timezone_id="America/New_York",
     )
@@ -608,7 +622,7 @@ with sync_playwright() as p:
             pass
 
     page = ctx.pages[0] if ctx.pages else ctx.new_page()
-    page.add_init_script("Object.defineProperty(navigator, \\'webdriver\\', {{get: () => undefined}});")
+    # No navigator.webdriver override (tampered descriptor is detectable).
     page.goto("{req.url}", wait_until="domcontentloaded", timeout=60000)
     print("AUTH_READY", flush=True)
 
@@ -811,14 +825,15 @@ with sync_playwright() as p:
 
     ctx = p.chromium.launch_persistent_context(
         user_data_dir=str(MCP_PROFILE),
+        channel="chrome",
         headless=False,
         args=[
             "--disable-blink-features=AutomationControlled",
             "--disable-dev-shm-usage",
             "--no-sandbox",
+            "--enable-unsafe-swiftshader",
         ],
         viewport={{"width": vw, "height": vh}},
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         locale="en-US",
         timezone_id="America/New_York",
     )
@@ -831,7 +846,6 @@ with sync_playwright() as p:
             pass
 
     page = ctx.pages[0] if ctx.pages else ctx.new_page()
-    page.add_init_script("Object.defineProperty(navigator, \\'webdriver\\', {{get: () => undefined}});")
 
     print(json.dumps({{"ready": True}}), flush=True)
 
@@ -1023,7 +1037,6 @@ with sync_playwright() as p:
 
             elif action == "tab_open":
                 new_page = ctx.new_page()
-                new_page.add_init_script("Object.defineProperty(navigator, \\'webdriver\\', {{get: () => undefined}});")
                 url = cmd.get("url", "")
                 if url:
                     new_page.goto(url, wait_until="domcontentloaded", timeout=60000)
